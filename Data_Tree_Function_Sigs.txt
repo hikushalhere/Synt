@@ -1,0 +1,11 @@
+bool createNode(string path, void *data, int data_size, uint32_t flags);
+
+bool exists(string path, bool watch);
+
+bool deleteNode(string path, version);
+
+int  getData(string path, void *data, bool watch, int *version);
+
+bool setData(string path, void *data, int data_size, int version);
+
+vector<string> getChildren(string path, bool watch);
