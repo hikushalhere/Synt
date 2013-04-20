@@ -1,4 +1,4 @@
-bool createNode(string path, void *data, int data_size, uint32_t flags);
+int createNode(string path, void *data, int data_size, uint32_t flags);
 
 bool exists(string path, bool watch);
 
