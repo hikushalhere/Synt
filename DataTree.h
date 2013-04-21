@@ -10,15 +10,15 @@ using namespace std;
 #define NODE_SEQUENTIAL 0x00000002
 
 struct TreeNode {
-	string	label;
-	bool	exists;
-	bool	ephemeral;
-	void	*data;
-	int	data_size;
-	int	version;
-	int	child_seq;
+	string		label;
+	bool		exists;
+	bool		ephemeral;
+	void		*data;
+	uint32_t	data_size;
+	uint32_t	version;
+	uint32_t	child_seq;
 	vector<struct TreeNode *> children;
-	struct TreeNode *parent;
+	struct 		TreeNode *parent;
 
 	TreeNode();
 	TreeNode(string, bool, bool);
@@ -52,11 +52,11 @@ struct DataTree {
 
 	DataTree();
 	struct 	TreeNode *get_node(string);
-	int 	createNode(string, void *, int, uint32_t);
+	int 	createNode(string, void *, uint32_t, uint32_t);
 	bool 	exists(string, bool);
-	bool	deleteNode(string, int);
-	int 	getData(string, void *, bool, int *);
-	bool 	setData(string, void *, int, int);
+	bool	deleteNode(string, uint32_t);
+	int 	getData(string, void *, bool, uint32_t *);
+	bool 	setData(string, void *, uint32_t, uint32_t);
 	vector<string> getChildren(string, bool);
 };
 

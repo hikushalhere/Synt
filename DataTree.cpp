@@ -108,7 +108,7 @@ struct TreeNode *DataTree::get_node(string path) {
 	}
 }
 
-int DataTree::createNode(string path, void *data, int data_size, uint32_t flags) {
+int DataTree::createNode(string path, void *data, uint32_t data_size, uint32_t flags) {
 
 	vector<string>parsed_path;
 
@@ -380,7 +380,7 @@ bool DataTree::exists(string path, bool watch) {
 	return true;
 }
 
-bool DataTree::deleteNode(string path, int version) {
+bool DataTree::deleteNode(string path, uint32_t version) {
 
 	struct TreeNode *n;
 	vector<struct TreeNode *>::iterator citer;
@@ -432,7 +432,7 @@ bool DataTree::deleteNode(string path, int version) {
 
 }
 
-int DataTree::getData(string path, void *data, bool watch, int *version) {
+int DataTree::getData(string path, void *data, bool watch, uint32_t *version) {
 
 	struct TreeNode *n;
 	int len;
@@ -460,7 +460,7 @@ int DataTree::getData(string path, void *data, bool watch, int *version) {
 	return len;
 }
 
-bool DataTree::setData(string path, void *data, int data_len, int version) {
+bool DataTree::setData(string path, void *data, uint32_t data_len, uint32_t version) {
 
 	struct TreeNode *n;
 
