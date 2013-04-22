@@ -21,6 +21,14 @@ SyntController::SyntController(SyntInfo *info) {
 
     // Initialize the timestamp.
     this->updateTimestamp = 1;
+
+    // Initialize pthread mutex locks and condition variables.
+    pthread_mutex_init(&(this->clientSocketMapLock), NULL);
+    pthread_mutex_init(&(this->unorderedRequestMapLock), NULL);
+    pthread_mutex_init(&(this->myClientRequestsMapLock), NULL);
+    pthread_cond_init(&(this->conditionQueueEmpty), NULL);
+    pthread_cond_init(&(this->conditionQueueFull), NULL);
+    this->requestAvailable = false;
 }
 
 // Establishes a TCP connection with a host.
@@ -204,13 +212,24 @@ void* SyntController::handleClients(void) {
                             }
                         }
                     } else { // Got a message from a client.
-                        uint32_t syntRequestSize = sizeof(SyntMessage) + MAX_PATH_SIZE + MAX_DATA_SIZE * BYTE_TO_MB;
-                        SyntMessage *syntRequest = (SyntMessage *) malloc(syntRequestSize);
-                        int numBytesRecvd = recv(fd, (void *) syntRequest, syntRequestSize, 0); // TODO peek
-
+                        // Peek into the message to find the size of the message.
+                        SyntMessage requestPeek;
+                        int numBytesRecvd = recv(fd, (void *) &requestPeek, sizeof(SyntMessage), MSG_PEEK);
+                        
                         if(numBytesRecvd > 0) {
-                            ntoh(syntRequest, TYPE_SYNT_MESSAGE);  // Convert the client's request from network to host byte order.
-                            handleClientRequest(syntRequest, fd);  // Handle the client's request.
+                            ntoh(&requestPeek, TYPE_SYNT_MESSAGE); // Network to host byte order.
+                            uint32_t syntRequestSize = sizeof(SyntMessage) + requestPeek.dataLength;
+                            SyntMessage *syntRequest = (SyntMessage *) malloc(syntRequestSize);
+                            numBytesRecvd = recv(fd, (void *) syntRequest, syntRequestSize, 0);
+
+                            if(numBytesRecvd > 0) {
+                                ntoh(syntRequest, TYPE_SYNT_MESSAGE); // Network to host byte order.
+                                handleClientRequest(syntRequest, fd); // Handle the client's request.
+                            } else if(numBytesRecvd == 0) { // Client closed the connection.
+                                deleteClientState(fd);
+                            } else {
+                                perror("\nError while receving a message from the client: recv() failed.");
+                            }
                         } else if(numBytesRecvd == 0) { // Client closed the connection.
                             deleteClientState(fd);
                         } else {
@@ -239,27 +258,30 @@ void SyntController::deleteClientState(int clientSocket) {
     this->myClientRequestsMap.erase(clientSocket);
     pthread_mutex_unlock(&(this->myClientRequestsMapLock));
 
-    UpdatePair paxosUpdate; // The unique key of the update sent to Paxos.
 
-    // Remove the socket from clientSocketMap.
+    // Remove the socket from clientSocketMap and the corresponding any unordered request.
     pthread_mutex_lock(&(this->clientSocketMapLock));
     for(map<UpdatePair, int>::iterator iter = this->clientSocketMap.begin(); iter != this->clientSocketMap.end(); ++iter) {
         if(iter->second == clientSocket) {
-            paxosUpdate = iter->first;
-            this->clientSocketMap.erase(iter);
-            break;
+            UpdatePair paxosUpdate = iter->first; // The unique key of the update sent to Paxos.
+            this->clientSocketMap.erase(iter);    // Erase from the client socket map.
+
+            // Remove the unordered request from unorderedRequestMap.
+            SyntMessage *syntRequest = NULL;
+            pthread_mutex_lock(&(this->unorderedRequestMapLock));
+            if(this->unorderedRequestMap.count(paxosUpdate) == 1) {
+                syntRequest = this->unorderedRequestMap[paxosUpdate];
+                this->unorderedRequestMap.erase(paxosUpdate);
+            }
+            pthread_mutex_unlock(&(this->unorderedRequestMapLock));
+            
+            // Free up the memory held by the request.
+            if(syntRequest) {
+                free(syntRequest);
+            }
         }
     }
     pthread_mutex_unlock(&(this->clientSocketMapLock));
-
-    // Remove the unordered request from unorderedRequestMap.
-    pthread_mutex_lock(&(this->unorderedRequestMapLock));
-    SyntMessage *syntRequest = this->unorderedRequestMap[paxosUpdate];
-    this->unorderedRequestMap.erase(paxosUpdate);
-    pthread_mutex_unlock(&(this->unorderedRequestMapLock));
-    if(syntRequest) {
-        free(syntRequest);
-    }
 }
 
 // Handles a read or write request by sending it to a handler in a new thread.
@@ -431,7 +453,12 @@ void* SyntController::handleWriteRequests(SyntMessage *syntRequest, int clientSo
 
     // Enqueue the client request in my queue of requests from this client.
     pthread_mutex_lock(&(this->myClientRequestsMapLock));
+    while(this->requestAvailable) {
+        pthread_cond_wait(&(this->conditionQueueEmpty), &(this->myClientRequestsMapLock));
+    }
     this->myClientRequestsMap[clientSocket].push(syntRequest);
+    this->requestAvailable = true;
+    pthread_cond_signal(&(this->conditionQueueFull));
     pthread_mutex_unlock(&(this->myClientRequestsMapLock));
 
     if(firstTime) { // First update in this client session.
@@ -478,12 +505,18 @@ SyntUpdate* SyntController::constructSyntUpdate(SyntMessage *syntRequest, Update
 
 // Buffers the unordered request and removes it from the queue of pending updates.
 void SyntController::bufferUnorderedRequest(UpdatePair paxosUpdate) {
+    // Fetch the client whose queue to be enqueued with the client request.
     int clientSocket = this->clientSocketMap[paxosUpdate];
-    SyntMessage *syntRequest = this->myClientRequestsMap[clientSocket].front();
     
     // Remove the client request from the queue of pending updates.
     pthread_mutex_lock(&(this->myClientRequestsMapLock));
+    while(!this->requestAvailable) {
+        pthread_cond_wait(&(this->conditionQueueFull), &(this->myClientRequestsMapLock));
+    }
+    SyntMessage *syntRequest = this->myClientRequestsMap[clientSocket].front();
     this->myClientRequestsMap[clientSocket].pop();
+    this->requestAvailable = false;
+    pthread_cond_signal(&(this->conditionQueueEmpty));
     pthread_mutex_unlock(&(this->myClientRequestsMapLock));
     
     // Store in client request in the request queue in the map.
@@ -595,11 +628,11 @@ void SyntController::sendUpdateToPaxos(PaxosUpdate *paxosUpdate) {
 // Handles messages from Paxos.
 void* SyntController::handlePaxos(void) {
     while(1) {
+        // Receive message from Paxos service.
         PaxosUpdate paxosUpdateMessage;
-        int numBytesRecvd = recv(this->paxosSocket, (void *) &paxosUpdateMessage, sizeof(PaxosUpdate), 0); // Receive message from Paxos service.
+        int numBytesRecvd = recv(this->paxosSocket, (void *) &paxosUpdateMessage, sizeof(PaxosUpdate), 0);
 
         if(numBytesRecvd > 0) {
-            bool requestFound = true;
             ntoh(&paxosUpdateMessage, TYPE_PAXOS_UPDATE); // Network to host byte order.
             UpdatePair paxosUpdate(paxosUpdateMessage.clientId, paxosUpdateMessage.timestamp);
 
@@ -610,10 +643,6 @@ void* SyntController::handlePaxos(void) {
             if(requestExists) { // A request exists for the ordered update.
                 applyWriteUpdate(paxosUpdate);
             } else {
-                requestFound = false;
-            }
-
-            if(!requestFound) {
                 this->paxosUpdateSet.insert(paxosUpdate);
             }
         } else if(numBytesRecvd == 0) {
@@ -637,6 +666,9 @@ void SyntController::applyWriteUpdate(UpdatePair paxosUpdate) {
     this->unorderedRequestMap.erase(paxosUpdate);
     pthread_mutex_unlock(&(this->unorderedRequestMapLock));
     
+    // Apply write to in-memory data store.
+    uint32_t result = writeToDataTree(syntRequest);
+        
     // Fetch the client socket to write to.
     int clientSocket = -1;
     pthread_mutex_lock(&(this->clientSocketMapLock));
@@ -645,11 +677,8 @@ void SyntController::applyWriteUpdate(UpdatePair paxosUpdate) {
     }
     pthread_mutex_unlock(&(this->clientSocketMapLock));
 
-    if(clientSocket != -1) { // If the client session is sill active.
-        // Apply write to in-memory data store.
-        uint32_t result = writeToDataTree(syntRequest);
-        
-        // Respond to client with the result of the write operation. 
+    // Respond to client with the result of the write operation if there is an active session. 
+    if(clientSocket != -1) {
         respondToClient(syntRequest, (char *) &result, sizeof(result), clientSocket);
     }
     
@@ -702,43 +731,49 @@ uint32_t SyntController::writeToDataTree(SyntMessage *syntRequest) {
 // Handles messages from peer Synt controllers.
 void* SyntController::handleSynt(void) {
     while(1) {
-        // Receive message from a peer controller in a buffer.
-        uint32_t maxMsgSize = sizeof(SyntUpdate) + MAX_PATH_SIZE + MAX_DATA_SIZE * BYTE_TO_MB;
-        char *buffer = new char[maxMsgSize];
-        struct sockaddr_in peerAddress;
-        socklen_t addrLen = sizeof(peerAddress); // TODO peek
-        int numBytesRecvd = recvfrom(this->syntListenSocket, (void *) buffer, maxMsgSize, 0, (struct sockaddr *) &peerAddress, &addrLen); // Receive the message from a peer controller.
-
-        if(numBytesRecvd > 0) {
-            // Extract the SyntUpdate out of the buffer and convert the byte order.
-            SyntUpdate *syntUpdate = (SyntUpdate *) buffer; 
-            ntoh(syntUpdate, TYPE_SYNT_UPDATE); 
-
-            // Construct the SyntMessage out of the received SyntUpdate.
-            uint32_t syntRequestSize = sizeof(SyntMessage) + syntUpdate->dataLength;
-            SyntMessage *syntRequest = (SyntMessage *) malloc(syntRequestSize);
-            syntRequest->opType = syntUpdate->opType;
-            syntRequest->pathLength = syntUpdate->pathLength;
-            syntRequest->dataLength = syntUpdate->dataLength;
-            syntRequest->uint32Value = syntUpdate->uint32Value;
-            memcpy(syntRequest, syntUpdate + sizeof(SyntUpdate), syntRequest->dataLength);
-
-            // Create the request/update's key.
-            UpdatePair paxosUpdate(syntUpdate->clientId, syntUpdate->timestamp);
-            
-            // Buffer the SyntMessage. It will be used when Paxos orders the update.
-            pthread_mutex_lock(&(this->unorderedRequestMapLock));
-            this->unorderedRequestMap[paxosUpdate] = syntRequest;
-            pthread_mutex_unlock(&(this->unorderedRequestMapLock));
-            
-            if(this->paxosUpdateSet.count(paxosUpdate) == 1) { // Paxos has already ordered the update.
-                applyWriteUpdate(paxosUpdate);
-            }
-        } else if(numBytesRecvd < 0) {
-            perror("\nError while receiving message: recvfrom() failed.");
-        } 
+        // Peek into the message to find the size of the message.
+        SyntUpdate updatePeek;
+        int numBytesRecvd = recv(this->syntListenSocket, (void *) &updatePeek, sizeof(SyntUpdate), MSG_PEEK);
         
-        delete[] buffer; // Free up the buffer.
+        if(numBytesRecvd > 0) {
+            ntoh(&updatePeek, TYPE_SYNT_UPDATE); // Network to host byte order.
+            
+            // Receive message from a peer controller in a buffer.
+            uint32_t syntUpdateSize = sizeof(SyntUpdate) + updatePeek.dataLength;
+            SyntUpdate *syntUpdate = (SyntUpdate *) malloc(syntUpdateSize);
+            numBytesRecvd = recv(this->syntListenSocket, (void *) syntUpdate, syntUpdateSize, 0);
+
+            if(numBytesRecvd > 0) {
+                ntoh(syntUpdate, TYPE_SYNT_UPDATE); // Network to host byte order.
+
+                // Construct the SyntMessage out of the received SyntUpdate.
+                uint32_t syntRequestSize = sizeof(SyntMessage) + syntUpdate->dataLength;
+                SyntMessage *syntRequest = (SyntMessage *) malloc(syntRequestSize);
+                syntRequest->opType = syntUpdate->opType;
+                syntRequest->pathLength = syntUpdate->pathLength;
+                syntRequest->dataLength = syntUpdate->dataLength;
+                syntRequest->uint32Value = syntUpdate->uint32Value;
+                memcpy(syntRequest, syntUpdate + sizeof(SyntUpdate), syntRequest->dataLength);
+
+                // Create the request/update's key.
+                UpdatePair paxosUpdate(syntUpdate->clientId, syntUpdate->timestamp);
+                
+                // Buffer the SyntMessage. It will be used when Paxos orders the update.
+                pthread_mutex_lock(&(this->unorderedRequestMapLock));
+                this->unorderedRequestMap[paxosUpdate] = syntRequest;
+                pthread_mutex_unlock(&(this->unorderedRequestMapLock));
+                
+                if(this->paxosUpdateSet.count(paxosUpdate) == 1) { // Paxos has already ordered the update.
+                    applyWriteUpdate(paxosUpdate);
+                }
+        
+                free(syntUpdate); // Free up the memory taken by the update.
+            } else if(numBytesRecvd < 0) {
+                perror("\nError while receiving message: recv() failed.");
+            } 
+        } else if(numBytesRecvd < 0) {
+            perror("\nError while receiving message: recv() failed.");
+        } 
     }
     pthread_exit(0);
 }

@@ -79,9 +79,12 @@ class SyntController {
         std::map<UpdatePair, SyntMessage *> unorderedRequestMap;
         pthread_mutex_t unorderedRequestMapLock;
         
-        // Map of (Client Socket : Queue of pending Client Requests) and the mutex for it.
+        // Map of (Client Socket : Queue of pending Client Requests), the mutex and condition variables for it.
         std::map<int, std::queue<SyntMessage *> > myClientRequestsMap;
         pthread_mutex_t myClientRequestsMapLock;
+        pthread_cond_t conditionQueueEmpty;
+        pthread_cond_t conditionQueueFull;
+        bool requestAvailable;
 
         // Set of ordered Paxos updates for which the Client Request is yet to be received.
         std::set<UpdatePair> paxosUpdateSet;
