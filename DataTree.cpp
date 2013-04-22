@@ -9,6 +9,29 @@
 #include "DataTree.h"
 using namespace std;
 
+TreeNode::TreeNode() {
+        exists = false;
+	ephemeral = false;
+	data = NULL;
+	data_size = 0;
+	version = 0;
+	child_seq = 1;
+	children.clear();
+	parent = NULL;
+}
+
+DataTree::DataTree() {
+        root = NULL;
+	while(root == NULL) {
+		root = new TreeNode(string("/"), true, false);
+	}
+
+	pthread_mutexattr_t mattr;
+	pthread_mutexattr_init(&mattr);
+	pthread_mutexattr_settype(&mattr, PTHREAD_MUTEX_RECURSIVE);
+	pthread_mutex_init(&lock, &mattr);
+}
+
 vector <string> parse_path(string path) {
 
 	vector<string> retval;
