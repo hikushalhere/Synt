@@ -20,6 +20,18 @@ TreeNode::TreeNode() {
 	parent = NULL;
 }
 
+TreeNode::TreeNode(string l, bool ex, bool ep) {
+	label = l;
+	exists = ex;
+	ephemeral = ep;
+	data = NULL;
+	data_size = 0;
+	version = 0;
+	child_seq = 1;
+	children.clear();
+	parent = NULL;
+}
+
 DataTree::DataTree() {
         root = NULL;
 	while(root == NULL) {
@@ -131,13 +143,13 @@ struct TreeNode *DataTree::get_node(string path) {
 	}
 }
 
-int DataTree::createNode(string path, void *data, uint32_t data_size, uint32_t flags) {
+uint32_t DataTree::createNode(string path, void *data, uint32_t data_size, uint32_t flags) {
 
 	vector<string>parsed_path;
 
 	parsed_path = parse_path(path);
 	if(parsed_path.size() == 0) {
-		return -1;
+		return 0;
 	}
 
 	bool ephemeral, sequential;
@@ -236,7 +248,7 @@ int DataTree::createNode(string path, void *data, uint32_t data_size, uint32_t f
 					}
 					else {
 						pthread_mutex_unlock(&lock);
-						return -1;
+						return 0;
 					}
 				}
 					
@@ -455,7 +467,7 @@ bool DataTree::deleteNode(string path, uint32_t version) {
 
 }
 
-int DataTree::getData(string path, void *data, bool watch, uint32_t *version) {
+uint32_t DataTree::getData(string path, void *data, bool watch, uint32_t *version) {
 
 	struct TreeNode *n;
 	int len;
@@ -465,11 +477,13 @@ int DataTree::getData(string path, void *data, bool watch, uint32_t *version) {
 
 	if(n == NULL) {
 		pthread_mutex_unlock(&lock);
+		*version = 0;
 		return 0;
 	}
 
 	if(n->data == NULL) {
 		pthread_mutex_unlock(&lock);
+		*version = 0;
 		return 0;
 	}
 

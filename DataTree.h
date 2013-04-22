@@ -24,27 +24,16 @@ struct TreeNode {
 	TreeNode(string, bool, bool);
 };
 
-TreeNode::TreeNode(string l, bool ex, bool ep) {
-	label = l;
-	exists = ex;
-	ephemeral = ep;
-	data = NULL;
-	data_size = 0;
-	version = 0;
-	children.clear();
-	parent = NULL;
-}
-
 struct DataTree {
 	struct TreeNode *root;
 	pthread_mutex_t lock;
 
 	DataTree();
-	struct 	TreeNode *get_node(string);
-	int 	createNode(string, void *, uint32_t, uint32_t);
-	bool 	exists(string, bool);
-	bool	deleteNode(string, uint32_t);
-	int 	getData(string, void *, bool, uint32_t *);
-	bool 	setData(string, void *, uint32_t, uint32_t);
-	vector<string> getChildren(string, bool);
+	struct 		TreeNode *get_node(string);
+	uint32_t 	createNode(string, void *, uint32_t, uint32_t);
+	bool 		exists(string, bool);
+	bool		deleteNode(string, uint32_t);
+	uint32_t 	getData(string, void *, bool, uint32_t *);
+	bool 		setData(string, void *, uint32_t, uint32_t);
+	vector<string> 	getChildren(string, bool);
 };
