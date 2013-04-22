@@ -181,7 +181,6 @@ int paxos(char **hostnames, uint16_t paxos_port, uint16_t server_port,  int num_
 			exit(1);
 		}
 
-		freeaddrinfo(result);
 	}
 
 	/*
