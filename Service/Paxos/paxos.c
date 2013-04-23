@@ -286,7 +286,13 @@ int paxos(char **hostnames, uint16_t paxos_port, uint16_t server_port,  int num_
 		if(new_sock == -1) {
 			continue;
 		}
+		else {
+			break;
+		}
 	}
+
+	printf("Got a connection from Synt controller\n");
+	fflush(NULL);
 
 	zookeeper_socket = new_sock;
 
@@ -309,7 +315,8 @@ int paxos(char **hostnames, uint16_t paxos_port, uint16_t server_port,  int num_
 	}
 	//}
 	
-	pthread_join(paxos_handler_thr, NULL);
+	//pthread_join(paxos_handler_thr, NULL);
+	pthread_join(thr_temp, NULL);
 	
 	return 0;
 }

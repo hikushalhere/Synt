@@ -9,6 +9,8 @@
 
 #define CLIENT_MAX 100
 
+//#define DEBUG
+
 extern pthread_mutex_t global_lock, synch_lock;
 extern int synch;
 extern int	client_open_sockets[];

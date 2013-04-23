@@ -9,6 +9,8 @@ using namespace std;
 #define NODE_EPHEMERAL	0x00000001
 #define NODE_SEQUENTIAL 0x00000002
 
+#define DEBUG
+
 struct TreeNode {
 	string		label;
 	bool		exists;

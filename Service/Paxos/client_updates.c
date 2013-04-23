@@ -191,7 +191,7 @@ int enqueue_update(Client_Update *cu) {
 	insert_into_update_queue(&Update_Queue, cu);
 
 	//Last_Enqueued[cu->client_id] = cu->timestamp;
-	#ifdef DEBUF
+	#ifdef DEBUG
 	printf("enq old %d new %d\n", xentry->last_enqueued, cu->timestamp);
 	#endif
 	xentry->last_enqueued = cu->timestamp;

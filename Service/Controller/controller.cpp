@@ -19,7 +19,7 @@ SyntController *bootstrap(string, string, string, char *, uint32_t *);
 void printUsage();
 
 int main(int argc, char **argv) {
-    int nextArg = NOP, paxosPortNum = NOP, syntPortNum = NOP, clientPortNum;
+    int nextArg = NOP, paxosPortNum = NOP, syntPortNum = NOP, clientPortNum = NOP;
     char *hostFilePath;
     string paxosPort, syntPort, clientPort;
     bool proceed = true;
@@ -62,6 +62,9 @@ int main(int argc, char **argv) {
                         proceed = false;
                         continue;
                     }
+		    #ifdef DEBUG
+		    cout<<"\nPaxos port is: "<<paxosPort;
+		    #endif
                     break;
                 
                 case SYNT_PORT:
@@ -77,6 +80,9 @@ int main(int argc, char **argv) {
                         proceed = false;
                         continue;
                     }
+		    #ifdef DEBUG
+		    cout<<"\nSynt port is: "<<syntPort;
+		    #endif
                     break;
 
                 case CLIENT_PORT:
@@ -92,10 +98,16 @@ int main(int argc, char **argv) {
                         proceed = false;
                         continue;
                     }
+		    #ifdef DEBUG
+		    cout<<"\nClient port is: "<<clientPort;
+		    #endif
                     break;
 
                 case HOSTFILE:
                     hostFilePath = argv[i];
+		    #ifdef DEBUG
+		    cout<<"\nHost file is: "<<hostFilePath;
+		    #endif
                     break;
                 
                 case NOP:
@@ -123,11 +135,13 @@ void printUsage() {
 
 SyntController *bootstrap(string paxosPort, string syntPort, string clientPort, char *hostFilePath, uint32_t *myId) {
     bool foundMyself = false;
-    int status, numControllers = 0;
+    int status, numControllers = 1;
     char myHostName[HOST_NAME_LEN];
     vector<string> hostNames;
     ifstream hostfile(hostFilePath);
     SyntController *controller = NULL;
+
+    hostNames.push_back("Dummy"); // Pushing a dummy string to start server ids from 1.
 
     if(hostfile.is_open()) {
         if((status = gethostname(myHostName, HOST_NAME_LEN)) != 0) {

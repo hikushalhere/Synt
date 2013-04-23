@@ -1,6 +1,8 @@
 #ifndef SYNT_CONTROLLER_H
 #define SYNT_CONTROLLER_H
 
+#define DEBUG
+
 #include <iostream>
 #include <string>
 #include <map>
@@ -8,6 +10,7 @@
 #include <queue>
 #include <set>
 #include <cstdio>
+#include <cstring>
 #include <cerrno>
 #include <unistd.h>
 #include <sys/time.h>

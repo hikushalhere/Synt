@@ -11,6 +11,8 @@
 #include "message.h"
 #include "globals.h"
 
+#define DEBUG
+
 void *client_socket_handler(void *arg) {
 
 	int	client_sock, retval;
@@ -36,8 +38,8 @@ void *client_socket_handler(void *arg) {
 		printf("recv retval %d\n", retval);
 		#endif
 
-		if(retval == 0) {
-			continue;
+		if(retval <= 0) {
+			return NULL;
 		}
 
 		cu = (Client_Update *)buf;
@@ -52,6 +54,10 @@ void *client_socket_handler(void *arg) {
 			//close(client_sock);
 			//client_open_sockets[cu->client_id] = -1;
 			//return NULL;
+			#ifdef DEBUG
+			printf("ClientUpdate invalid type: %d\n", cu->type);
+			fflush(NULL);
+			#endif
 			continue;
 		}
 
@@ -59,6 +65,10 @@ void *client_socket_handler(void *arg) {
 			//client_open_sockets[cu->client_id] = -1;
 			//close(client_sock);
 			//return NULL;
+			#ifdef DEBUG
+			printf("ClientUpdate invalid server id: %d\n", cu->server_id);
+			fflush(NULL);
+			#endif
 			continue;
 		}
 

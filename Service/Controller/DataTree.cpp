@@ -147,6 +147,11 @@ uint32_t DataTree::createNode(string path, void *data, uint32_t data_size, uint3
 
 	vector<string>parsed_path;
 
+	#ifdef DEBUG
+	cout << "Creating node: " << path << "\n";
+	cout.flush();
+	#endif
+
 	parsed_path = parse_path(path);
 	if(parsed_path.size() == 0) {
 		return 0;
@@ -219,13 +224,18 @@ uint32_t DataTree::createNode(string path, void *data, uint32_t data_size, uint3
 					new_node->parent = curr;
 					new_node->version = 1;
 					if(data != NULL) {
-						memcpy(new_node->data, data, data_size);
+						new_node->data = data;
+						new_node->data_size = data_size;
 					}
 					else {
 						new_node->data = NULL;
 						new_node->data_size = 0;
 					}
 					pthread_mutex_unlock(&lock);
+
+					#ifdef DEBUG
+					cout << "Created node: " << path << max_seq + 1 << "\n";
+					#endif
 					return (max_seq + 1);
 				}
 				else {
@@ -237,7 +247,7 @@ uint32_t DataTree::createNode(string path, void *data, uint32_t data_size, uint3
 							free(data);
 						}
 						if(data != NULL) {
-							memcpy((*citer)->data,  data, data_size);
+							(*citer)->data = data;
 							(*citer)->data_size = data_size;
 						}
 						else {
@@ -247,6 +257,11 @@ uint32_t DataTree::createNode(string path, void *data, uint32_t data_size, uint3
 						//TODO Check if watch is set at this point.
 					}
 					else {
+						#ifdef DEBUG
+						cout << "Node: " << path << " already exists!\n";
+						cout.flush();
+						#endif
+
 						pthread_mutex_unlock(&lock);
 						return 0;
 					}
@@ -276,13 +291,20 @@ uint32_t DataTree::createNode(string path, void *data, uint32_t data_size, uint3
 					new_node->parent = curr;
 					new_node->version = 1;
 					if(data != NULL) {
-						memcpy(new_node->data, data, data_size);
+						new_node->data = data;
+						new_node->data_size = data_size;
 					}
 					else {
 						new_node->data = NULL;
 						new_node->data_size = 0;
 					}
 					pthread_mutex_unlock(&lock);
+
+					#ifdef DEBUG
+					cout << "Created node: " << path << max_seq + 1 << "\n";
+					cout.flush();
+					#endif
+
 					return (max_seq + 1);
 				}
 				else {
@@ -294,12 +316,19 @@ uint32_t DataTree::createNode(string path, void *data, uint32_t data_size, uint3
 					new_node->parent = curr;
 					new_node->version = 1;
 					if(data != NULL) {
-						memcpy(new_node->data, data, data_size);
+						new_node->data = data;
+						new_node->data_size = data_size;
 					}
 					else {
 						new_node->data = NULL;
 						new_node->data_size = 0;
 					}
+
+					#ifdef DEBUG
+					cout << "Created node: " << path << "\n";
+					cout.flush();
+					#endif
+
 					pthread_mutex_unlock(&lock);
 					return 1;
 				}
@@ -311,6 +340,10 @@ uint32_t DataTree::createNode(string path, void *data, uint32_t data_size, uint3
 bool DataTree::exists(string path, bool watch) {
 
 	vector<string> parsed_path;
+
+	#ifdef DEBUG
+	cout << "Checking if node: " << path << " exists..\n";
+	#endif
 
 	/* special case: root */
 	if(path == "/") {
@@ -355,6 +388,10 @@ bool DataTree::exists(string path, bool watch) {
 					}
 					else {
 						pthread_mutex_unlock(&lock);
+
+						#ifdef DEBUG
+						cout << "Node: " << path << " does not exist.\n";
+						#endif
 						return false;
 					}
 				}
@@ -372,6 +409,9 @@ bool DataTree::exists(string path, bool watch) {
 				}
 				else {
 					pthread_mutex_unlock(&lock);
+					#ifdef DEBUG
+					cout << "Node: " << path << " does not exist.\n";
+					#endif
 					return false;
 				}
 			}
@@ -380,6 +420,9 @@ bool DataTree::exists(string path, bool watch) {
 			if(citer != curr->children.end()) {
 				if((*citer)->exists == true) {
 					pthread_mutex_unlock(&lock);
+					#ifdef DEBUG
+					cout << "Node: " << path << " exists.\n";
+					#endif
 					return true;
 				}
 				else {
@@ -387,11 +430,17 @@ bool DataTree::exists(string path, bool watch) {
 						//TODO insert watch if necessary
 					}
 					pthread_mutex_unlock(&lock);
+					#ifdef DEBUG
+					cout << "Node: " << path << " does not exist.\n";
+					#endif
 					return false;
 				}
 						
 			}
 			else {
+				#ifdef DEBUG
+				cout << "Node: " << path << " does not exist.\n";
+				#endif
 				if(watch == true) {
 					//TODO
 					new_node = NULL;
