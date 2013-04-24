@@ -470,15 +470,7 @@ void SyntController::sendToClient(SyntMessage *syntResponse, uint32_t responseSi
 
 // Handles clients' write requests.
 void* SyntController::handleWriteRequests(SyntMessage *syntRequest, int clientSocket) {
-    bool isFirstConnection = false, isQueueEmpty = false;
-
-    // Check if this is the client's first request.
-    pthread_mutex_lock(&(this->clientSocketSetLock));
-    if(this->clientSocketSet.count(clientSocket) == 0) {
-        this->clientSocketSet.insert(clientSocket);
-        isFirstConnection = true;
-    }
-    pthread_mutex_unlock(&(this->clientSocketSetLock));
+    bool isQueueEmpty = false;
 
     pthread_mutex_lock(&(this->pendingClientRequestsQueueLock));
     // Check if the request queue empty.
@@ -487,20 +479,67 @@ void* SyntController::handleWriteRequests(SyntMessage *syntRequest, int clientSo
     }
     // Enqueue the client request in my queue of pending requests.
     this->pendingClientRequestsQueue.push(make_pair(clientSocket, syntRequest));
-    if(isQueueEmpty && !isFirstConnection) {
+    if(isQueueEmpty) {
 #ifdef DEBUG
-    	cout<<"\nQueue was empty and not first connection. Going signal queueNotEmpty."; 
+    	cout<<"\nQueue was empty. Going signal queueNotEmpty."; 
 #endif
     	pthread_cond_signal(&(this->queueNotEmptyCondition));
     }
     pthread_mutex_unlock(&(this->pendingClientRequestsQueueLock));
+}
 
-    if(isFirstConnection) { // First update of the client's session.
+// Handles messages from Paxos.
+void* SyntController::handlePaxos(void) {
+    while(1) {
 #ifdef DEBUG
-    	cout<<"\nFirst connection. Going to order the write request."; 
+cout<<"\nGoing to send update to Paxos with timestamp = "<<this->updateTimestamp;
+cout.flush();
 #endif
-        orderRequest(make_pair(this->myId, this->updateTimestamp)); // Send the update to Paxos.
+        orderRequest(make_pair(this->myId, this->updateTimestamp));
+
+        // Receive message from Paxos service.
+        PaxosUpdate paxosUpdateMessage;
+#ifdef DEBUG
+cout<<"\nWaiting for ordered update from paxos."; 
+cout.flush();
+#endif
+        int numBytesRecvd = recv(this->paxosSocket, (void *) &paxosUpdateMessage, sizeof(PaxosUpdate), 0);
+
+        if(numBytesRecvd > 0) {
+#ifdef DEBUG
+cout<<"\nGot ordered update from Paxos";
+cout.flush();
+#endif
+            ntoh(&paxosUpdateMessage, TYPE_PAXOS_UPDATE); // Network to host byte order.
+            UpdatePair paxosUpdate(paxosUpdateMessage.clientId, paxosUpdateMessage.timestamp);
+
+#ifdef DEBUG
+cout<<"\nPaxos update is: "<<paxosUpdateMessage.clientId<<","<<paxosUpdateMessage.timestamp;
+cout.flush();
+#endif
+            pthread_mutex_lock(&(this->unorderedRequestMapLock));
+            bool requestExists = (bool) this->unorderedRequestMap.count(paxosUpdate);
+            pthread_mutex_unlock(&(this->unorderedRequestMapLock));
+            
+            if(requestExists) { // A request exists for the ordered update.
+#ifdef DEBUG
+cout<<"\nGoing to apply the write to data tree.";
+cout.flush();
+#endif
+                applyWriteUpdate(paxosUpdate);
+            } else {
+                pthread_mutex_lock(&(this->paxosUpdateSetLock));
+                this->paxosUpdateSet.insert(paxosUpdate);
+                pthread_mutex_unlock(&(this->paxosUpdateSetLock));
+            }
+        } else if(numBytesRecvd == 0) {
+            cerr<<"\nPaxos closed the connection.";
+            break;
+        } else {
+            perror("\nFailed to received message from Paxos: recv() failed.");
+        }
     }
+    pthread_exit(0);
 }
 
 // Updates the data structures before a request is sent to Paxos to be ordered.
@@ -679,60 +718,6 @@ cout.flush();
         cerr<<"\nFailed to send message to Paxos";
         perror("\nFailed to send message: send() failed.");
     }
-}
-
-// Handles messages from Paxos.
-void* SyntController::handlePaxos(void) {
-    while(1) {
-        // Receive message from Paxos service.
-        PaxosUpdate paxosUpdateMessage;
-#ifdef DEBUG
-cout<<"\nWaiting for ordered update from paxos."; 
-cout.flush();
-#endif
-        int numBytesRecvd = recv(this->paxosSocket, (void *) &paxosUpdateMessage, sizeof(PaxosUpdate), 0);
-
-        if(numBytesRecvd > 0) {
-#ifdef DEBUG
-cout<<"\nGot ordered update from Paxos";
-cout.flush();
-#endif
-            ntoh(&paxosUpdateMessage, TYPE_PAXOS_UPDATE); // Network to host byte order.
-            UpdatePair paxosUpdate(paxosUpdateMessage.clientId, paxosUpdateMessage.timestamp);
-
-#ifdef DEBUG
-cout<<"\nPaxos update is: "<<paxosUpdateMessage.clientId<<","<<paxosUpdateMessage.timestamp;
-cout.flush();
-#endif
-            pthread_mutex_lock(&(this->unorderedRequestMapLock));
-            bool requestExists = (bool) this->unorderedRequestMap.count(paxosUpdate);
-            pthread_mutex_unlock(&(this->unorderedRequestMapLock));
-            
-            if(requestExists) { // A request exists for the ordered update.
-#ifdef DEBUG
-cout<<"\nGoing to apply the write to data tree.";
-cout.flush();
-#endif
-                applyWriteUpdate(paxosUpdate);
-            } else {
-                pthread_mutex_lock(&(this->paxosUpdateSetLock));
-                this->paxosUpdateSet.insert(paxosUpdate);
-                pthread_mutex_unlock(&(this->paxosUpdateSetLock));
-            }
-        } else if(numBytesRecvd == 0) {
-            cerr<<"\nPaxos closed the connection.";
-            break;
-        } else {
-            perror("\nFailed to received message from Paxos: recv() failed.");
-        }
-       
-#ifdef DEBUG
-cout<<"\nGoing to send update to Paxos with timestamp = "<<this->updateTimestamp;
-cout.flush();
-#endif
-        orderRequest(make_pair(this->myId, this->updateTimestamp));
-    }
-    pthread_exit(0);
 }
 
 // Serves the write request corresponding to the Paxos update that has been ordered.
