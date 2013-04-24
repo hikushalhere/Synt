@@ -21,6 +21,7 @@
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <pthread.h>
+#include <time.h>
 #include "DataTree.h"
 #include "message_format.h"
 

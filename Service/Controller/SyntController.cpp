@@ -569,27 +569,34 @@ cout<<"\nGoing to send the request to paxos.";
 // Buffers the unordered request and removes it from the queue of pending updates.
 void SyntController::updateDataStructures(UpdatePair paxosUpdate) {
     // Remove the client request from the queue of pending client requests.
+    int status;
+    struct timespec timeout;
+    memset(&timeout, 0, sizeof(timeout));
+    timeout.tv_sec = 0;
+    timeout.tv_nsec = 1000000; // 1 millisecond.
     pthread_mutex_lock(&(this->pendingClientRequestsQueueLock));
-    while(this->pendingClientRequestsQueue.size() == 0) {
-        pthread_cond_wait(&(this->queueNotEmptyCondition), &(this->pendingClientRequestsQueueLock));
+    do {
+        status = pthread_cond_timedwait(&(this->queueNotEmptyCondition), &(this->pendingClientRequestsQueueLock), &timeout);
+    } while(this->pendingClientRequestsQueue.size() == 0 || status != ETIMEDOUT); 
+    if(status != ETIMEDOUT) {
+        RequestPair request = this->pendingClientRequestsQueue.front();
+        this->pendingClientRequestsQueue.pop();
+
+        // Get the client update and the corresponsing client socket.
+        int clientSocket = request.first;
+        SyntMessage *syntRequest = request.second;
+
+        // Store the client socket in map indexed by the update key.
+        pthread_mutex_lock(&(this->clientUpdateSocketMapLock));
+        this->clientUpdateSocketMap[paxosUpdate] = clientSocket;
+        pthread_mutex_unlock(&(this->clientUpdateSocketMapLock));
+        
+        // Store in client request in the request queue in the map.
+        pthread_mutex_lock(&(this->unorderedRequestMapLock));
+        this->unorderedRequestMap[paxosUpdate] = syntRequest;
+        pthread_mutex_unlock(&(this->unorderedRequestMapLock));
     }
-    RequestPair request = this->pendingClientRequestsQueue.front();
-    this->pendingClientRequestsQueue.pop();
     pthread_mutex_unlock(&(this->pendingClientRequestsQueueLock));
-
-    // Get the client update and the corresponsing client socket.
-    int clientSocket = request.first;
-    SyntMessage *syntRequest = request.second;
-
-    // Store the client socket in map indexed by the update key.
-    pthread_mutex_lock(&(this->clientUpdateSocketMapLock));
-    this->clientUpdateSocketMap[paxosUpdate] = clientSocket;
-    pthread_mutex_unlock(&(this->clientUpdateSocketMapLock));
-    
-    // Store in client request in the request queue in the map.
-    pthread_mutex_lock(&(this->unorderedRequestMapLock));
-    this->unorderedRequestMap[paxosUpdate] = syntRequest;
-    pthread_mutex_unlock(&(this->unorderedRequestMapLock));
 }
 
 // Constructs a SyntUpdate message from a SyntMessage request.
