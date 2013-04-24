@@ -23,12 +23,12 @@ SyntController::SyntController(SyntInfo *info) {
     this->updateTimestamp = 1;
 
     // Initialize pthread mutex locks and condition variables.
-    pthread_mutex_init(&(this->clientSocketMapLock), NULL);
+    pthread_mutex_init(&(this->clientSocketSetLock), NULL);
+    pthread_mutex_init(&(this->clientUpdateSocketMapLock), NULL);
     pthread_mutex_init(&(this->unorderedRequestMapLock), NULL);
-    pthread_mutex_init(&(this->myClientRequestsMapLock), NULL);
-    //pthread_cond_init(&(this->conditionQueueEmpty), NULL);
-    pthread_cond_init(&(this->conditionQueueFull), NULL);
-    //this->requestAvailable = false;
+    pthread_mutex_init(&(this->pendingClientRequestsQueueLock), NULL);
+    pthread_mutex_init(&(this->paxosUpdateSetLock), NULL);
+    pthread_cond_init(&(this->queueNotEmptyCondition), NULL);
 }
 
 // Establishes a TCP connection with a host.
@@ -250,25 +250,31 @@ void* SyntController::handleClients(void) {
 
 // Deletes the state about the client - session socket and all pending requests.
 void SyntController::deleteClientState(int clientSocket) {
-    // Clear all pending requests from the client.
-    pthread_mutex_lock(&(this->myClientRequestsMapLock));
-    while(!(this->myClientRequestsMap[clientSocket].empty())) {
-        SyntMessage *syntRequest = this->myClientRequestsMap[clientSocket].front();
-        if(syntRequest) {
-            free(syntRequest); // Free up memory held by the pending request.
+    queue<RequestPair> tempRequestQueue;
+    
+    // Clear all pending requests from the client and keep the rest.
+    pthread_mutex_lock(&(this->pendingClientRequestsQueueLock));
+    while(!this->pendingClientRequestsQueue.empty()) {
+        RequestPair request = this->pendingClientRequestsQueue.front();
+        if(request.first == clientSocket) { // If the request is from this client.
+            SyntMessage *syntRequest = request.second;
+            if(syntRequest) {
+                free(syntRequest); // Free up memory held by the pending request.
+            }
+        } else {
+            tempRequestQueue.push(request); // Push the request into new queue.
         }
-        this->myClientRequestsMap[clientSocket].pop();
+        this->pendingClientRequestsQueue.pop();
     }
-    this->myClientRequestsMap.erase(clientSocket);
-    pthread_mutex_unlock(&(this->myClientRequestsMapLock));
+    this->pendingClientRequestsQueue = tempRequestQueue; // Store the new queue.
+    pthread_mutex_unlock(&(this->pendingClientRequestsQueueLock));
 
-
-    // Remove the socket from clientSocketMap and the corresponding any unordered request.
-    pthread_mutex_lock(&(this->clientSocketMapLock));
-    for(map<UpdatePair, int>::iterator iter = this->clientSocketMap.begin(); iter != this->clientSocketMap.end(); ++iter) {
+    // Remove the socket from clientUpdateSocketMap and the corresponding any unordered request.
+    pthread_mutex_lock(&(this->clientUpdateSocketMapLock));
+    for(map<UpdatePair, int>::iterator iter = this->clientUpdateSocketMap.begin(); iter != this->clientUpdateSocketMap.end(); ++iter) {
         if(iter->second == clientSocket) {
             UpdatePair paxosUpdate = iter->first; // The unique key of the update sent to Paxos.
-            this->clientSocketMap.erase(iter);    // Erase from the client socket map.
+            this->clientUpdateSocketMap.erase(iter);    // Erase from the client socket map.
 
             // Remove the unordered request from unorderedRequestMap.
             SyntMessage *syntRequest = NULL;
@@ -285,7 +291,12 @@ void SyntController::deleteClientState(int clientSocket) {
             }
         }
     }
-    pthread_mutex_unlock(&(this->clientSocketMapLock));
+    pthread_mutex_unlock(&(this->clientUpdateSocketMapLock));
+
+    // Remove the client socket from the clientSocketSet
+    pthread_mutex_lock(&(this->clientSocketSetLock));
+    this->clientSocketSet.erase(clientSocket);
+    pthread_mutex_unlock(&(this->clientSocketSetLock));
 }
 
 // Handles a read or write request by sending it to a handler in a new thread.
@@ -459,50 +470,43 @@ void SyntController::sendToClient(SyntMessage *syntResponse, uint32_t responseSi
 
 // Handles clients' write requests.
 void* SyntController::handleWriteRequests(SyntMessage *syntRequest, int clientSocket) {
-	#ifdef DEBUG
-	cout<<"\nGot a write request"; 
-	#endif
-    UpdatePair paxosUpdate(this->myId, this->updateTimestamp);
-    bool wasQueueEmpty = false;
+    bool isFirstConnection = false, isQueueEmpty = false;
 
-	#ifdef DEBUG
-	printf("\nThe data received is: %10s", syntRequest->data);
-	#endif
-    // Store the client socket in map indexed by the update key.
-    pthread_mutex_lock(&(this->clientSocketMapLock));
-    this->clientSocketMap[paxosUpdate] = clientSocket;
-    pthread_mutex_unlock(&(this->clientSocketMapLock));
-
-    pthread_mutex_lock(&(this->myClientRequestsMapLock));
-    
     // Check if this is the client's first request.
-    if(this->myClientRequestsMap[clientSocket].size() == 0) {
-	#ifdef DEBUG
-	cout<<"\nQueue was empty."; 
-	#endif
-        wasQueueEmpty = true;
+    pthread_mutex_lock(&(this->clientSocketSetLock));
+    if(this->clientSocketSet.count(clientSocket) == 0) {
+        this->clientSocketSet.insert(clientSocket);
+        isFirstConnection = true;
     }
-    
-    // Enqueue the client request in my queue of requests from this client.
-    this->myClientRequestsMap[clientSocket].push(syntRequest);
-    /*if(wasQueueEmpty) {
-    	pthread_cond_signal(&(this->conditionQueueFull));
-    }*/
-    
-    pthread_mutex_unlock(&(this->myClientRequestsMapLock));
+    pthread_mutex_unlock(&(this->clientSocketSetLock));
 
-    if(wasQueueEmpty) { // First update in this client session.
-	#ifdef DEBUG
-	cout<<"\nGoing to order the write request."; 
-	#endif
-        orderRequest(paxosUpdate); // Send the update to be ordered via Paxos.
+    pthread_mutex_lock(&(this->pendingClientRequestsQueueLock));
+    // Check if the request queue empty.
+    if(this->pendingClientRequestsQueue.size() == 0) {
+        isQueueEmpty = true;
+    }
+    // Enqueue the client request in my queue of pending requests.
+    this->pendingClientRequestsQueue.push(make_pair(clientSocket, syntRequest));
+    if(isQueueEmpty && !isFirstConnection) {
+#ifdef DEBUG
+    	cout<<"\nQueue was empty and not first connection. Going signal queueNotEmpty."; 
+#endif
+    	pthread_cond_signal(&(this->queueNotEmptyCondition));
+    }
+    pthread_mutex_unlock(&(this->pendingClientRequestsQueueLock));
+
+    if(isFirstConnection) { // First update of the client's session.
+#ifdef DEBUG
+    	cout<<"\nFirst connection. Going to order the write request."; 
+#endif
+        orderRequest(make_pair(this->myId, this->updateTimestamp)); // Send the update to Paxos.
     }
 }
 
 // Updates the data structures before a request is sent to Paxos to be ordered.
 void SyntController::orderRequest(UpdatePair paxosUpdate) {
     // Buffer the client request to be sent.
-    bufferUnorderedRequest(paxosUpdate);
+    updateDataStructures(paxosUpdate);
     
     // Send the client request to peer Synt controllers.
     SyntMessage *syntRequest = this->unorderedRequestMap[paxosUpdate];
@@ -523,6 +527,32 @@ cout<<"\nGoing to send the request to paxos.";
     this->updateTimestamp++;
 }
 
+// Buffers the unordered request and removes it from the queue of pending updates.
+void SyntController::updateDataStructures(UpdatePair paxosUpdate) {
+    // Remove the client request from the queue of pending client requests.
+    pthread_mutex_lock(&(this->pendingClientRequestsQueueLock));
+    while(this->pendingClientRequestsQueue.size() == 0) {
+        pthread_cond_wait(&(this->queueNotEmptyCondition), &(this->pendingClientRequestsQueueLock));
+    }
+    RequestPair request = this->pendingClientRequestsQueue.front();
+    this->pendingClientRequestsQueue.pop();
+    pthread_mutex_unlock(&(this->pendingClientRequestsQueueLock));
+
+    // Get the client update and the corresponsing client socket.
+    int clientSocket = request.first;
+    SyntMessage *syntRequest = request.second;
+
+    // Store the client socket in map indexed by the update key.
+    pthread_mutex_lock(&(this->clientUpdateSocketMapLock));
+    this->clientUpdateSocketMap[paxosUpdate] = clientSocket;
+    pthread_mutex_unlock(&(this->clientUpdateSocketMapLock));
+    
+    // Store in client request in the request queue in the map.
+    pthread_mutex_lock(&(this->unorderedRequestMapLock));
+    this->unorderedRequestMap[paxosUpdate] = syntRequest;
+    pthread_mutex_unlock(&(this->unorderedRequestMapLock));
+}
+
 // Constructs a SyntUpdate message from a SyntMessage request.
 SyntUpdate* SyntController::constructSyntUpdate(SyntMessage *syntRequest, UpdatePair paxosUpdate) {
     uint32_t updateSize = sizeof(SyntUpdate) + syntRequest->dataLength;
@@ -539,26 +569,6 @@ SyntUpdate* SyntController::constructSyntUpdate(SyntMessage *syntRequest, Update
     memcpy(destination, source, syntRequest->dataLength);
     
     return syntUpdate;
-}
-
-// Buffers the unordered request and removes it from the queue of pending updates.
-void SyntController::bufferUnorderedRequest(UpdatePair paxosUpdate) {
-    // Fetch the client whose queue to be enqueued with the client request.
-    int clientSocket = this->clientSocketMap[paxosUpdate];
-    
-    // Remove the client request from the queue of pending updates.
-    pthread_mutex_lock(&(this->myClientRequestsMapLock));
-    /*while(this->myClientRequestsMap[clientSocket].size() == 0) {
-        pthread_cond_wait(&(this->conditionQueueFull), &(this->myClientRequestsMapLock));
-    }*/
-    SyntMessage *syntRequest = this->myClientRequestsMap[clientSocket].front();
-    this->myClientRequestsMap[clientSocket].pop();
-    pthread_mutex_unlock(&(this->myClientRequestsMapLock));
-    
-    // Store in client request in the request queue in the map.
-    pthread_mutex_lock(&(this->unorderedRequestMapLock));
-    this->unorderedRequestMap[paxosUpdate] = syntRequest;
-    pthread_mutex_unlock(&(this->unorderedRequestMapLock));
 }
 
 // Sends SyntUpdate to all controllers notifying them of a client request received.
@@ -705,7 +715,9 @@ cout.flush();
 #endif
                 applyWriteUpdate(paxosUpdate);
             } else {
+                pthread_mutex_lock(&(this->paxosUpdateSetLock));
                 this->paxosUpdateSet.insert(paxosUpdate);
+                pthread_mutex_unlock(&(this->paxosUpdateSetLock));
             }
         } else if(numBytesRecvd == 0) {
             cerr<<"\nPaxos closed the connection.";
@@ -714,16 +726,11 @@ cout.flush();
             perror("\nFailed to received message from Paxos: recv() failed.");
         }
        
-       	pthread_mutex_lock(&(this->clientSocketMapLock));
-       	int clientSocket = this->clientSocketMap[
-       	pthread_mutex_unlock(&(this->clientSocketMapLock));
-       	
-	
-	pthread_mutex_lock(&(this->myClientRequestsMapLock));
-        if(this->unorderedRequestMap
-	UpdatePair newPaxosUpdate(this->myId, this->updateTimestamp);
-        orderRequest(newPaxosUpdate);
-       	pthread_mutex_lock(&(this->myClientRequestsMapLock));
+#ifdef DEBUG
+cout<<"\nGoing to send update to Paxos with timestamp = "<<this->updateTimestamp;
+cout.flush();
+#endif
+        orderRequest(make_pair(this->myId, this->updateTimestamp));
     }
     pthread_exit(0);
 }
@@ -741,11 +748,11 @@ void SyntController::applyWriteUpdate(UpdatePair paxosUpdate) {
         
     // Fetch the client socket to write to.
     int clientSocket = -1;
-    pthread_mutex_lock(&(this->clientSocketMapLock));
-    if(this->clientSocketMap.count(paxosUpdate) == 1) {
-        clientSocket = this->clientSocketMap[paxosUpdate];
+    pthread_mutex_lock(&(this->clientUpdateSocketMapLock));
+    if(this->clientUpdateSocketMap.count(paxosUpdate) == 1) {
+        clientSocket = this->clientUpdateSocketMap[paxosUpdate];
     }
-    pthread_mutex_unlock(&(this->clientSocketMapLock));
+    pthread_mutex_unlock(&(this->clientUpdateSocketMapLock));
 
     // Respond to client with the result of the write operation if there is an active session. 
     if(clientSocket != -1) {
@@ -758,9 +765,11 @@ void SyntController::applyWriteUpdate(UpdatePair paxosUpdate) {
     }
 
     // Remove the update from pending update's map.
+    pthread_mutex_lock(&(this->paxosUpdateSetLock));
     if(this->paxosUpdateSet.count(paxosUpdate) == 1) {
         this->paxosUpdateSet.erase(paxosUpdate);
     }
+    pthread_mutex_unlock(&(this->paxosUpdateSetLock));
 }
 
 // Performs write on the in-memory data store depending on the type of request.
@@ -859,9 +868,7 @@ cout.flush();
                 syntRequest->pathLength = syntUpdate->pathLength;
                 syntRequest->dataLength = syntUpdate->dataLength;
                 syntRequest->uint32Value = syntUpdate->uint32Value;
-		char *source = ((char *) syntUpdate) + sizeof(SyntUpdate);
-		//char *destination = ((char *) syntRequest) + sizeof(SyntMessage);
-                memcpy(syntRequest->data, source, syntRequest->dataLength);
+                memcpy(syntRequest->data, syntUpdate->data, syntRequest->dataLength);
 
 #ifdef DEBUG
 cout<<"\nFinal pathLength in request: "<<syntRequest->pathLength;
@@ -875,9 +882,11 @@ cout.flush();
                 this->unorderedRequestMap[paxosUpdate] = syntRequest;
                 pthread_mutex_unlock(&(this->unorderedRequestMapLock));
                 
+                pthread_mutex_lock(&(this->paxosUpdateSetLock));
                 if(this->paxosUpdateSet.count(paxosUpdate) == 1) { // Paxos has already ordered the update.
                     applyWriteUpdate(paxosUpdate);
                 }
+                pthread_mutex_unlock(&(this->paxosUpdateSetLock));
         
                 free(syntUpdate); // Free up the memory taken by the update.
             } else if(numBytesRecvd < 0) {

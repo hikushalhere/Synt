@@ -51,7 +51,8 @@
 #define SEC_TO_MICROSEC 1000000
 #define SEND_TIMEOUT 2 // In seconds.
 
-typedef std::pair<uint32_t, uint32_t> UpdatePair; // (id, timestamp)
+typedef std::pair<uint32_t, uint32_t> UpdatePair;  // (id, timestamp)
+typedef std::pair<int, SyntMessage *> RequestPair; // (socket, request)
 
 class SyntController {
     private:
@@ -74,23 +75,26 @@ class SyntController {
         int syntListenSocket;         // UDP socket for receiving connections from peers.
         int clientListenSocket;       // TCP socket for accepting connections from Client.
 
+        // Set of client sockets to maintain all the client connections.
+        std::set<int> clientSocketSet;
+        pthread_mutex_t clientSocketSetLock;
+
         // Map of (Client Update : Client Session Socket) and the mutex for it. 
-        std::map<UpdatePair, int> clientSocketMap;
-        pthread_mutex_t clientSocketMapLock;
+        std::map<UpdatePair, int> clientUpdateSocketMap;
+        pthread_mutex_t clientUpdateSocketMapLock;
         
         // Map of (Client Update : Client Request already sent to Paxos) and the mutex for it.
         std::map<UpdatePair, SyntMessage *> unorderedRequestMap;
         pthread_mutex_t unorderedRequestMapLock;
         
-        // Map of (Client Socket : Queue of pending Client Requests), the mutex and condition variables for it.
-        std::map<int, std::queue<SyntMessage *> > myClientRequestsMap;
-        pthread_mutex_t myClientRequestsMapLock;
-        pthread_cond_t conditionQueueEmpty;
-        pthread_cond_t conditionQueueFull;
-        bool requestAvailable;
+        // Queue of pending client requests, the mutex and condition variable for it.
+        std::queue<RequestPair> pendingClientRequestsQueue;
+        pthread_mutex_t pendingClientRequestsQueueLock;
+        pthread_cond_t queueNotEmptyCondition;
 
-        // Set of ordered Paxos updates for which the Client Request is yet to be received.
+        // Set of unapplied ordered Paxos updates and the mutex for it.
         std::set<UpdatePair> paxosUpdateSet;
+        pthread_mutex_t paxosUpdateSetLock;
         
         /********************/
         /* Private Methods. */
@@ -142,7 +146,7 @@ class SyntController {
         SyntUpdate *constructSyntUpdate(SyntMessage *, UpdatePair);
         
         // Buffers the unordered request and removes it from the queue of pending updates.
-        void bufferUnorderedRequest(UpdatePair);
+        void updateDataStructures(UpdatePair);
 
         // Sends SyntUpdate to all controllers notifying them of a client request received.
         void sendSyntUpdateToControllers(void *, uint32_t);
