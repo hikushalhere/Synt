@@ -47,7 +47,7 @@
 
 #define TYPE_PAXOS_UPDATE 1
 #define TYPE_SYNT_MESSAGE 2
-#define TYPE_SYNT_UPDATE 3
+#define TYPE_HEARTBEAT 3
 
 #define SEC_TO_MICROSEC 1000000
 #define SEND_TIMEOUT 2 // In seconds.
@@ -63,7 +63,7 @@ class SyntController {
 
         uint32_t myId;                      // My unique id.
         uint32_t numControllers;            // Number of controllers in the system.
-        uint32_t updateTimestamp;           // Increasing timestamp counter for Paxos updates.
+//        uint32_t updateTimestamp;           // Increasing timestamp counter for Paxos updates.
         std::vector<std::string> hostNames; // Vector of host names of other controllers.
         fd_set masterReadList;              // Master list of client sockets to read from.
         pthread_mutex_t masterReadListLock; // Mutex variable for masterReadList.
@@ -72,9 +72,11 @@ class SyntController {
         std::string paxosPort;        // Paxos's port to use for making a TCP connection.
         std::string syntListenPort;   // Port to listen for peer Synt Controller UDP connections.
         std::string clientListenPort; // Port to listen for Clients' TCP connections.
+        std::string heartbeatPort;    // Port to listen for Heartbeat messages.
         int paxosSocket;              // TCP socket for communicating with Paxos.
         int syntListenSocket;         // UDP socket for receiving connections from peers.
         int clientListenSocket;       // TCP socket for accepting connections from Client.
+        int heartbeatSocket;          // UDP socket for receving heartbeat messages.
 
         // Set of client sockets to maintain all the client connections.
         std::set<int> clientSocketSet;
@@ -141,22 +143,19 @@ class SyntController {
         void *handleWriteRequests(SyntMessage *, int);
     
         // Updates the data structures before a request is sent to Paxos to be ordered.
-        void orderRequest(UpdatePair);
+        void orderRequest();
 
-        // Constructs a SyntUpdate message from a SyntMessage request.
-        SyntUpdate *constructSyntUpdate(SyntMessage *, UpdatePair);
-        
         // Buffers the unordered request and removes it from the queue of pending updates.
-        void updateDataStructures(UpdatePair);
+        bool updateDataStructures(UpdatePair &);
 
         // Sends SyntUpdate to all controllers notifying them of a client request received.
-        void sendSyntUpdateToControllers(void *, uint32_t);
+        void sendSyntMessageToControllers(void *, uint32_t);
 
         // Sends a message to a host via UDP.
         bool sendMessage(void *, uint32_t, std::string);   
     
         // Constructs and returns and PaxosUpdate.
-        PaxosUpdate *constructPaxosUpdate();
+        PaxosUpdate *constructPaxosUpdate(UpdatePair);
 
         // Sends an update to Paxos.
         void sendUpdateToPaxos(PaxosUpdate *);
@@ -172,6 +171,9 @@ class SyntController {
 
         // Handles messages from peer Synt controllers.
         void *handleSynt(void);
+
+        // Handles heartbeat messages and replies with "I am alive".
+        void *handleHeartbeat(void);
 
         // Utility function to convert messages from host to network byte order.
         void hton(void *, uint32_t);
@@ -200,6 +202,9 @@ class SyntController {
         
         // Static method to start the thread for handling Paxos messages.
         static void *startPaxosHandlerThread(void *);
+        
+	// Static method to start the thread for responding to heartbeats.
+        static void *startHeartbeatHandlerThread(void *);
 };
 
 #endif

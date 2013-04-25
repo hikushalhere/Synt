@@ -12,30 +12,24 @@ typedef struct {
     std::string paxosPort;
     std::string syntListenPort;
     std::string clientListenPort;
+    std::string heartbeatPort;
 } SyntInfo;
 
-// Message format to communicate with client.
+// Message format to for exchanging Synt updates/requests.
+#pragma pack(1)
 typedef struct {
+    uint32_t clientId;
+    uint32_t timestamp;
     uint32_t opType;
     uint32_t pathLength;
     uint32_t dataLength;
     uint32_t uint32Value; // Can hold any integer as required. (Version or Flag)
     char data[];
 } SyntMessage;
-
-// Message format to communicate with peer Synt controllers.
-typedef struct {
-    uint32_t clientId;
-    uint32_t timestamp;
-    // The following fields are from a SyntMessage that this update should carry.
-    uint32_t opType;
-    uint32_t pathLength;
-    uint32_t dataLength;
-    uint32_t uint32Value;
-    char data[];
-} SyntUpdate;
+#pragma pack()
 
 // Message format to communicate with Paxos.
+#pragma pack(1)
 typedef struct {
     uint32_t type;      // Must be equal to 1.
     uint32_t clientId;
@@ -43,5 +37,13 @@ typedef struct {
     uint32_t timestamp;
     uint32_t update;
 } PaxosUpdate;
+#pragma pack()
+
+// Message fromat for heartbeat messages.
+#pragma pack(1)
+typedef struct {
+    uint32_t serverId;
+} Heartbeat;
+#pragma pack()
 
 #endif

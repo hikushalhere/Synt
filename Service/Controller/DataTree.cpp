@@ -568,12 +568,13 @@ bool DataTree::setData(string path, void *data, uint32_t data_len, uint32_t vers
 	}
 
 	if(n->data != NULL) {
-		free(data);
+		free(n->data);
 		n->data_size = 0;
 	}
 
 	n->data = data;
 	n->data_size = data_len;
+	n->version++;
 
 	pthread_mutex_unlock(&lock);
 	return true;
@@ -605,3 +606,30 @@ vector<string> DataTree::getChildren(string path, bool watch) {
 	pthread_mutex_unlock(&lock);
 	return retvec;
 }
+/*
+int main() {
+
+	DataTree t;
+
+	int retval;
+	char *data, *new_data;
+
+	data = (char *)malloc(100);
+	sprintf(data, "test_data");
+
+	retval = t.createNode("/home/rajas", data, 10, 0);
+	cout << "Create /home/rajas retval " << retval << "\n";
+	
+	new_data = (char *)malloc(100);
+	sprintf(new_data, "new_test_data");
+	retval = t.setData("/home/rajas", new_data, 13, 1);
+	cout << "setData retval = " << retval << "\n";
+	
+	char read_data[100];
+	uint32_t version;
+	retval = t.getData("/home/rajas", read_data, false, &version );
+	cout << "Data: " << read_data << "\n";
+
+	return 0;
+}
+*/

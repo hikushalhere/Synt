@@ -11,16 +11,25 @@ SyntController::SyntController(SyntInfo *info) {
     this->paxosPort = info->paxosPort;
     this->syntListenPort = info->syntListenPort;
     this->clientListenPort = info->clientListenPort;
+    this->heartbeatPort = info->heartbeatPort;
 
     // Set up the  network sockets.
     this->paxosSocket = establishConnection(PAXOS_HOST, this->paxosPort);
     this->syntListenSocket = startListening(this->syntListenPort, SOCK_DGRAM);
     this->clientListenSocket = startListening(this->clientListenPort, SOCK_STREAM);
+    this->heartbeatSocket = startListening(this->heartbeatPort, SOCK_DGRAM);
     FD_ZERO(&this->masterReadList);
     FD_SET(this->clientListenSocket, &this->masterReadList);
 
-    // Initialize the timestamp.
-    this->updateTimestamp = 1;
+    // Set the timeout for the Paxos socket.
+    struct timeval timeout;
+    memset(&timeout, 0, sizeof(struct timeval));
+    timeout.tv_sec = 0;
+    timeout.tv_usec = 1000;
+    int status = setsockopt(this->paxosSocket, SOL_SOCKET, SO_RCVTIMEO, (char *) &timeout, sizeof(timeout));
+    if(status != 0) {
+        throw string("\nA timeout value could not be set for Paxos socket.");
+    }
 
     // Initialize pthread mutex locks and condition variables.
     pthread_mutex_init(&(this->clientSocketSetLock), NULL);
@@ -137,15 +146,18 @@ void SyntController::start() {
     pthread_t clientThread;
     pthread_t syntThread;
     pthread_t paxosThread;
+    pthread_t heartbeatThread;
     int status;
 
     pthread_create(&clientThread, NULL, SyntController::startClientHandlerThread, this);
     pthread_create(&syntThread, NULL, SyntController::startSyntHandlerThread, this);
     pthread_create(&paxosThread, NULL, SyntController::startPaxosHandlerThread, this);
+    pthread_create(&heartbeatThread, NULL, SyntController::startHeartbeatHandlerThread, this);
 
     pthread_join(clientThread, NULL);
     pthread_join(syntThread, NULL);
     pthread_join(paxosThread, NULL);
+    pthread_join(heartbeatThread, NULL);
 }
 
 // Static method to start the thread for handling client connections.
@@ -161,6 +173,11 @@ void* SyntController::startSyntHandlerThread(void *arg) {
 // Static method to start the thread for handling Paxos messages.
 void* SyntController::startPaxosHandlerThread(void *arg) {
     return ((SyntController *) arg)->handlePaxos();
+}
+
+// Static method to start the thread for handling Heartbeat messages.
+void* SyntController::startHeartbeatHandlerThread(void *arg) {
+    return ((SyntController *) arg)->handleHeartbeat();
 }
 
 // Handles all client connections.
@@ -340,15 +357,19 @@ void* SyntController::handleReadRequests(SyntMessage *syntRequest, int clientSoc
                 bool watch = false;
                 uint32_t version;
                 data = new char[MAX_DATA_SIZE * BYTE_TO_MB];
-                uint32_t dataLength = this->dataTree.getData(path, data, watch, &version);
+                dataLength = this->dataTree.getData(path, data, watch, &version);
+		#ifdef DEBUG
+		cout<<"\nData length returned by getData() = "<<dataLength<<" and data is "<<data;
+		#endif
                 
-                // Create a new data buffer and packe the data preceded by the version number.
+                // Create a new data buffer and pack the data preceded by the version number.
                 char *newData = new char[sizeof(version) + dataLength];
                 memcpy(newData, &version, sizeof(version));
                 memcpy(newData + sizeof(version), data, dataLength);
-
-                delete[] data;
-                data = newData;
+		
+                delete[] data; // Delete the initial buffer
+                data = newData;// Reset it to the newly created buffer.
+		dataLength += sizeof(version); // Increment the data length to include the size of version.
             }
             break;
 
@@ -446,6 +467,8 @@ void SyntController::respondToClient(SyntMessage *syntRequest, char *data, uint3
 // Constructs the response to be sent to the client.
 void SyntController::constructClientResponse(SyntMessage *syntRequest, SyntMessage *syntResponse, char *data, uint32_t dataLength) {
     // Copy the components of the repsonse one by one.
+    syntResponse->clientId = syntRequest->clientId;
+    syntResponse->timestamp = syntRequest->timestamp;
     syntResponse->opType = syntRequest->opType;
     syntResponse->pathLength = syntRequest->pathLength;
     syntResponse->dataLength = dataLength;
@@ -490,19 +513,15 @@ void* SyntController::handleWriteRequests(SyntMessage *syntRequest, int clientSo
 
 // Handles messages from Paxos.
 void* SyntController::handlePaxos(void) {
-    while(1) {
 #ifdef DEBUG
-cout<<"\nGoing to send update to Paxos with timestamp = "<<this->updateTimestamp;
+cout<<"\nStarted Paxos thread.";
 cout.flush();
 #endif
-        orderRequest(make_pair(this->myId, this->updateTimestamp));
+    while(1) {
+        orderRequest();
 
         // Receive message from Paxos service.
         PaxosUpdate paxosUpdateMessage;
-#ifdef DEBUG
-cout<<"\nWaiting for ordered update from paxos."; 
-cout.flush();
-#endif
         int numBytesRecvd = recv(this->paxosSocket, (void *) &paxosUpdateMessage, sizeof(PaxosUpdate), 0);
 
         if(numBytesRecvd > 0) {
@@ -535,7 +554,7 @@ cout.flush();
         } else if(numBytesRecvd == 0) {
             cerr<<"\nPaxos closed the connection.";
             break;
-        } else {
+        } else if(errno != EAGAIN && errno != EWOULDBLOCK) {
             perror("\nFailed to received message from Paxos: recv() failed.");
         }
     }
@@ -543,31 +562,36 @@ cout.flush();
 }
 
 // Updates the data structures before a request is sent to Paxos to be ordered.
-void SyntController::orderRequest(UpdatePair paxosUpdate) {
+void SyntController::orderRequest() {
     // Buffer the client request to be sent.
-    updateDataStructures(paxosUpdate);
+    UpdatePair paxosUpdate;
+    bool updated = updateDataStructures(paxosUpdate);
     
-    // Send the client request to peer Synt controllers.
-    SyntMessage *syntRequest = this->unorderedRequestMap[paxosUpdate];
-    SyntUpdate *syntUpdate = constructSyntUpdate(syntRequest, paxosUpdate);
-    hton(syntUpdate, TYPE_SYNT_UPDATE);
-    sendSyntUpdateToControllers(syntUpdate, sizeof(SyntUpdate) + syntRequest->dataLength);
-    free(syntUpdate);
-    
-    // Send the update to Paxos to be ordered.
-    PaxosUpdate *paxosUpdateMessage = constructPaxosUpdate();
+    if(updated) {
+	    // Send the client request to peer Synt controllers.
+	    SyntMessage *syntRequest = this->unorderedRequestMap[paxosUpdate];
+	    uint32_t syntRequestLength = sizeof(SyntMessage) + syntRequest->dataLength;
+	    hton(syntRequest, TYPE_SYNT_MESSAGE);
 #ifdef DEBUG
-cout<<"\nGoing to send the request to paxos."; 
+cout<<"\n=============================";
+cout<<"\nPaxos update will be sent with timestamp = "<<paxosUpdate.second<<" and clientId = "<<paxosUpdate.first;
+cout<<"\n=============================";
+cout.flush();
 #endif
-    sendUpdateToPaxos(paxosUpdateMessage);
-    delete paxosUpdateMessage;
-
-    // Increment the update timestamp.
-    this->updateTimestamp++;
+	    sendSyntMessageToControllers(syntRequest, syntRequestLength);
+	    ntoh(syntRequest, TYPE_SYNT_MESSAGE);
+	    
+	    // Send the update to Paxos to be ordered.
+	    PaxosUpdate *paxosUpdateMessage = constructPaxosUpdate(paxosUpdate);
+	    sendUpdateToPaxos(paxosUpdateMessage);
+	    delete paxosUpdateMessage;
+    }
 }
 
 // Buffers the unordered request and removes it from the queue of pending updates.
-void SyntController::updateDataStructures(UpdatePair paxosUpdate) {
+bool SyntController::updateDataStructures(UpdatePair &paxosUpdate) {
+    bool updated = true;
+    
     // Remove the client request from the queue of pending client requests.
     int status;
     struct timespec timeout;
@@ -577,14 +601,15 @@ void SyntController::updateDataStructures(UpdatePair paxosUpdate) {
     pthread_mutex_lock(&(this->pendingClientRequestsQueueLock));
     do {
         status = pthread_cond_timedwait(&(this->queueNotEmptyCondition), &(this->pendingClientRequestsQueueLock), &timeout);
-    } while(this->pendingClientRequestsQueue.size() == 0 || status != ETIMEDOUT); 
-    if(status != ETIMEDOUT) {
+    } while(this->pendingClientRequestsQueue.size() == 0 && status != ETIMEDOUT); 
+    if(this->pendingClientRequestsQueue.size() > 0) {
         RequestPair request = this->pendingClientRequestsQueue.front();
         this->pendingClientRequestsQueue.pop();
 
         // Get the client update and the corresponsing client socket.
         int clientSocket = request.first;
         SyntMessage *syntRequest = request.second;
+	paxosUpdate = make_pair(syntRequest->clientId, syntRequest->timestamp);
 
         // Store the client socket in map indexed by the update key.
         pthread_mutex_lock(&(this->clientUpdateSocketMapLock));
@@ -595,30 +620,16 @@ void SyntController::updateDataStructures(UpdatePair paxosUpdate) {
         pthread_mutex_lock(&(this->unorderedRequestMapLock));
         this->unorderedRequestMap[paxosUpdate] = syntRequest;
         pthread_mutex_unlock(&(this->unorderedRequestMapLock));
+    } else {
+    	updated = false;
     }
     pthread_mutex_unlock(&(this->pendingClientRequestsQueueLock));
+
+    return updated;
 }
 
-// Constructs a SyntUpdate message from a SyntMessage request.
-SyntUpdate* SyntController::constructSyntUpdate(SyntMessage *syntRequest, UpdatePair paxosUpdate) {
-    uint32_t updateSize = sizeof(SyntUpdate) + syntRequest->dataLength;
-    SyntUpdate *syntUpdate = (SyntUpdate *) malloc(updateSize);
-    
-    syntUpdate->clientId = paxosUpdate.first;
-    syntUpdate->timestamp = paxosUpdate.second;
-    syntUpdate->opType = syntRequest->opType;
-    syntUpdate->pathLength = syntRequest->pathLength;
-    syntUpdate->dataLength = syntRequest->dataLength;
-    syntUpdate->uint32Value = syntRequest->uint32Value;
-    char *source = ((char *) syntRequest) + sizeof(SyntMessage);
-    char *destination = ((char *) syntUpdate) + sizeof(SyntUpdate);
-    memcpy(destination, source, syntRequest->dataLength);
-    
-    return syntUpdate;
-}
-
-// Sends SyntUpdate to all controllers notifying them of a client request received.
-void SyntController::sendSyntUpdateToControllers(void *message, uint32_t messageSize) {
+// Sends SyntMessage to all controllers notifying them of a client request received.
+void SyntController::sendSyntMessageToControllers(void *message, uint32_t messageSize) {
     if(messageSize > 0) {
         bool *sendQueue = new bool[this->numControllers];
         uint32_t sendCount = 0;
@@ -702,14 +713,14 @@ bool SyntController::sendMessage(void *msg, uint32_t msgSize, string hostname) {
 }
 
 // Constructs and returns and PaxosUpdate.
-PaxosUpdate* SyntController::constructPaxosUpdate() {
-    PaxosUpdate *paxosUpdate = new PaxosUpdate;
-    paxosUpdate->type = TYPE_PAXOS_UPDATE;
-    paxosUpdate->clientId = this->myId;
-    paxosUpdate->serverId = this->myId;
-    paxosUpdate->timestamp = this->updateTimestamp;
-    paxosUpdate->update = DUMMY_UPDATE_VALUE;
-    return paxosUpdate;
+PaxosUpdate* SyntController::constructPaxosUpdate(UpdatePair paxosUpdate) {
+    PaxosUpdate *paxosUpdateMessage = new PaxosUpdate;
+    paxosUpdateMessage->type = TYPE_PAXOS_UPDATE;
+    paxosUpdateMessage->clientId = paxosUpdate.first;
+    paxosUpdateMessage->serverId = this->myId;
+    paxosUpdateMessage->timestamp = paxosUpdate.second;
+    paxosUpdateMessage->update = DUMMY_UPDATE_VALUE;
+    return paxosUpdateMessage;
 }
 
 // Sends an update to Paxos.
@@ -766,35 +777,38 @@ void SyntController::applyWriteUpdate(UpdatePair paxosUpdate) {
 
 // Performs write on the in-memory data store depending on the type of request.
 uint32_t SyntController::writeToDataTree(SyntMessage *syntRequest) {
-    char *data = NULL;
+    char *writeData = NULL;
     uint32_t status, version, flags;
-    uint32_t dataSize = syntRequest->dataLength - syntRequest->pathLength;
+    uint32_t writeDataSize = syntRequest->dataLength - syntRequest->pathLength;
     string path = getPath(syntRequest);
 
 #ifdef DEBUG
 cout<<"\nPath for the data node is: "<<path;
 cout.flush();
 #endif
-    if(dataSize > 0) {
+    if(writeDataSize > 0) {
 	// This buffer is handled by the DataTree layer. It will be deallocated when the node associated with it is deleted.
-        data = (char *) malloc(dataSize);
-	char *source = ((char *) syntRequest) + sizeof(SyntMessage) + syntRequest->pathLength;
-        memcpy(data, source, dataSize);
+        writeData = (char *) malloc(writeDataSize);
+        memcpy(writeData, syntRequest->data + syntRequest->pathLength, writeDataSize);
+#ifdef DEBUG
+cout<<"\nData to be stored is: "<<writeData<<" and its size is = "<<writeDataSize;
+cout.flush();
+#endif
     }
 
     switch(syntRequest->opType) {
         case CREATE:
+            flags = syntRequest->uint32Value;
 #ifdef DEBUG
-cout<<"\nCreate request.";
+cout<<"\nCreate request. Flag is = "<<flags;
 cout.flush();
 #endif
-            flags = syntRequest->uint32Value;
-            status = dataTree.createNode(path, data, dataSize, flags);
+            status = dataTree.createNode(path, writeData, writeDataSize, flags);
             break;
 
         case SET_DATA:
             version = syntRequest->uint32Value;
-            status = dataTree.setData(path, data, dataSize, version);
+            status = dataTree.setData(path, writeData, writeDataSize, version);
             break;
 
         case DELETE:
@@ -817,26 +831,26 @@ cout.flush();
 void* SyntController::handleSynt(void) {
     while(1) {
         // Peek into the message to find the size of the message.
-        SyntUpdate updatePeek;
+        SyntMessage updatePeek;
 	struct sockaddr peerAddress;
 	socklen_t addrLen = sizeof(peerAddress);
 #ifdef DEBUG
 cout<<"\nWaiting for update from peers.";
 cout.flush();
 #endif
-        int numBytesRecvd = recvfrom(this->syntListenSocket, (void *) &updatePeek, sizeof(SyntUpdate), MSG_PEEK, &peerAddress, &addrLen);
+        int numBytesRecvd = recvfrom(this->syntListenSocket, (void *) &updatePeek, sizeof(SyntMessage), MSG_PEEK, &peerAddress, &addrLen);
         
         if(numBytesRecvd > 0) {
 #ifdef DEBUG
 cout<<"\nGot an update from a peer.";
 cout.flush();
 #endif
-            ntoh(&updatePeek, TYPE_SYNT_UPDATE); // Network to host byte order.
+            ntoh(&updatePeek, TYPE_SYNT_MESSAGE); // Network to host byte order.
             
             // Receive message from a peer controller in a buffer.
-            uint32_t syntUpdateSize = sizeof(SyntUpdate) + updatePeek.dataLength;
-            SyntUpdate *syntUpdate = (SyntUpdate *) malloc(syntUpdateSize);
-            numBytesRecvd = recvfrom(this->syntListenSocket, (void *) syntUpdate, syntUpdateSize, 0, &peerAddress, &addrLen);
+            uint32_t syntRequestSize = sizeof(SyntMessage) + updatePeek.dataLength;
+            SyntMessage *syntRequest = (SyntMessage *) malloc(syntRequestSize);
+            numBytesRecvd = recvfrom(this->syntListenSocket, (void *) syntRequest, syntRequestSize, 0, &peerAddress, &addrLen);
 
 #ifdef DEBUG
 cout<<"\nRead an update from a peer.";
@@ -844,30 +858,16 @@ cout.flush();
 #endif
             if(numBytesRecvd > 0) {
 #ifdef DEBUG
-cout<<"\nInitial pathLength from peer: "<<syntUpdate->pathLength;
+cout<<"\nInitial pathLength from peer: "<<syntRequest->pathLength;
 cout.flush();
 #endif
-                ntoh(syntUpdate, TYPE_SYNT_UPDATE); // Network to host byte order.
+                ntoh(syntRequest, TYPE_SYNT_MESSAGE); // Network to host byte order.
 #ifdef DEBUG
-cout<<"\nFinal pathLength from peer: "<<syntUpdate->pathLength;
-cout.flush();
-#endif
-
-                // Construct the SyntMessage out of the received SyntUpdate.
-                uint32_t syntRequestSize = sizeof(SyntMessage) + syntUpdate->dataLength;
-                SyntMessage *syntRequest = (SyntMessage *) malloc(syntRequestSize);
-                syntRequest->opType = syntUpdate->opType;
-                syntRequest->pathLength = syntUpdate->pathLength;
-                syntRequest->dataLength = syntUpdate->dataLength;
-                syntRequest->uint32Value = syntUpdate->uint32Value;
-                memcpy(syntRequest->data, syntUpdate->data, syntRequest->dataLength);
-
-#ifdef DEBUG
-cout<<"\nFinal pathLength in request: "<<syntRequest->pathLength;
+cout<<"\nFinal pathLength from peer: "<<syntRequest->pathLength;
 cout.flush();
 #endif
                 // Create the request/update's key.
-                UpdatePair paxosUpdate(syntUpdate->clientId, syntUpdate->timestamp);
+                UpdatePair paxosUpdate(syntRequest->clientId, syntRequest->timestamp);
                 
                 // Buffer the SyntMessage. It will be used when Paxos orders the update.
                 pthread_mutex_lock(&(this->unorderedRequestMapLock));
@@ -879,8 +879,6 @@ cout.flush();
                     applyWriteUpdate(paxosUpdate);
                 }
                 pthread_mutex_unlock(&(this->paxosUpdateSetLock));
-        
-                free(syntUpdate); // Free up the memory taken by the update.
             } else if(numBytesRecvd < 0) {
                 perror("\nError while receiving message: recv() failed.");
             } 
@@ -891,28 +889,55 @@ cout.flush();
     pthread_exit(0);
 }
 
+// Handles heartbeat messages and replies with "I am alive".
+void* SyntController::handleHeartbeat(void) {
+#ifdef DEBUG
+cout<<"\nStarting heartbeat thread.";
+cout.flush();
+#endif
+    while(1) {
+        Heartbeat heartbeat;
+        sockaddr_in sourceAddress;
+	socklen_t addrLen = sizeof(sourceAddress);
+        uint32_t numBytesRecvd = recvfrom(this->heartbeatSocket, (void *) &heartbeat, sizeof(Heartbeat), 0, (sockaddr *) &sourceAddress, &addrLen);
+
+	if(numBytesRecvd > 0) { // Need to respond to heartbeat.
+            // Build the address to send to.
+	    sockaddr_in destAddress;
+	    destAddress.sin_family = AF_INET;
+	    destAddress.sin_port = htons((uint16_t) atoi(this->heartbeatPort.c_str()));
+	    memcpy(&(destAddress.sin_addr), &(sourceAddress.sin_addr), sizeof(destAddress.sin_addr));
+
+            // Store my id in heartbeat and convert to network byte order.
+	    heartbeat.serverId = myId;
+	    hton(&heartbeat, TYPE_HEARTBEAT);
+
+            // Send the heartbeat.
+	    uint32_t numBytesSent = sendto(this->heartbeatSocket, (void *) &heartbeat, sizeof(Heartbeat), 0, (struct sockaddr *) &destAddress, sizeof(destAddress));
+	    if(numBytesSent < 0) {
+	        perror("\nError while sending heartbeat message: sendto() failed.");
+	    }
+	} else if(numBytesRecvd == 0) {
+	    perror("\nNode collecting heartbeat has closed the connection.");
+	} else {
+	    perror("\nError while receiving heartbeat message: recvfrom() failed.");
+	}
+    }
+    pthread_exit(0);
+}
+
 // Utility function to convert messages from host to network byte order.
 void SyntController::hton(void *message, uint32_t messageType) {
     switch(messageType) {
         case TYPE_SYNT_MESSAGE:
             {
                 SyntMessage *syntRequest = (SyntMessage *) message;
+                syntRequest->clientId = htonl(syntRequest->clientId);
+                syntRequest->timestamp = htonl(syntRequest->timestamp);
                 syntRequest->opType = htonl(syntRequest->opType);
                 syntRequest->pathLength = htonl(syntRequest->pathLength);
                 syntRequest->dataLength = htonl(syntRequest->dataLength);
                 syntRequest->uint32Value = htonl(syntRequest->uint32Value);
-            }
-            break;
-
-        case TYPE_SYNT_UPDATE:
-             {
-                SyntUpdate *syntUpdate = (SyntUpdate *) message;
-                syntUpdate->clientId = htonl(syntUpdate->clientId);
-                syntUpdate->timestamp = htonl(syntUpdate->timestamp);
-                syntUpdate->opType = htonl(syntUpdate->opType);
-                syntUpdate->pathLength = htonl(syntUpdate->pathLength);
-                syntUpdate->dataLength = htonl(syntUpdate->dataLength);
-                syntUpdate->uint32Value = htonl(syntUpdate->uint32Value);
             }
             break;
 
@@ -926,6 +951,12 @@ void SyntController::hton(void *message, uint32_t messageType) {
                 paxosUpdate->update = htonl(paxosUpdate->update);
             }
             break;
+
+        case TYPE_HEARTBEAT:
+	    {
+	        Heartbeat *heartbeat = (Heartbeat *) message;
+		heartbeat->serverId = htonl(heartbeat->serverId);
+	    }
     }
 }
 
@@ -935,22 +966,12 @@ void SyntController::ntoh(void *message, uint32_t messageType) {
         case TYPE_SYNT_MESSAGE:
             {
                 SyntMessage *syntRequest = (SyntMessage *) message;
+                syntRequest->clientId = htonl(syntRequest->clientId);
+                syntRequest->timestamp = htonl(syntRequest->timestamp);
                 syntRequest->opType = ntohl(syntRequest->opType);
                 syntRequest->pathLength = ntohl(syntRequest->pathLength);
                 syntRequest->dataLength = ntohl(syntRequest->dataLength);
                 syntRequest->uint32Value = ntohl(syntRequest->uint32Value);
-            }
-            break;
-
-        case TYPE_SYNT_UPDATE:
-            {
-                SyntUpdate *syntUpdate = (SyntUpdate *) message;
-                syntUpdate->clientId = ntohl(syntUpdate->clientId);
-                syntUpdate->timestamp = ntohl(syntUpdate->timestamp);
-                syntUpdate->opType = ntohl(syntUpdate->opType);
-                syntUpdate->pathLength = ntohl(syntUpdate->pathLength);
-                syntUpdate->dataLength = ntohl(syntUpdate->dataLength);
-                syntUpdate->uint32Value = ntohl(syntUpdate->uint32Value);
             }
             break;
 
