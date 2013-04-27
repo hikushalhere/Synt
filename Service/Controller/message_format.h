@@ -4,11 +4,17 @@
 #include <string>
 #include <vector>
 
+#define TYPE_PAXOS_UPDATE 1
+#define TYPE_SYNT_MESSAGE 2
+#define TYPE_SYNT_MESSAGE_ACK 3
+#define TYPE_HEARTBEAT_CHECK 4
+#define TYPE_HEARTBEAT_DELETE_SERVER 5
+
 // Data structure to pass to SyntController's constructor.
 typedef struct {
     uint32_t myId;
     uint32_t numControllers;
-    std::vector<std::string> hostNames;
+    std::map<uint32_t, std::string> hostNameMap;
     std::string paxosPort;
     std::string syntListenPort;
     std::string clientListenPort;
@@ -28,6 +34,15 @@ typedef struct {
 } SyntMessage;
 #pragma pack()
 
+// Message format to for acknowledging Synt updates/requests to peers.
+#pragma pack(1)
+typedef struct {
+    uint32_t serverId;
+    uint32_t clientId;
+    uint32_t timestamp;
+} SyntMessageAck;
+#pragma pack()
+
 // Message format to communicate with Paxos.
 #pragma pack(1)
 typedef struct {
@@ -39,9 +54,10 @@ typedef struct {
 } PaxosUpdate;
 #pragma pack()
 
-// Message fromat for heartbeat messages.
+// Message format for heartbeat messages.
 #pragma pack(1)
 typedef struct {
+    uint32_t type;
     uint32_t serverId;
 } Heartbeat;
 #pragma pack()

@@ -12,5 +12,6 @@
 *.la
 *.a
 
-# Mac DS_Store
+# Mac
 .DS_Store
+controller.dSYM/

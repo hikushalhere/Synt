@@ -160,11 +160,9 @@ SyntController *bootstrap(string paxosPort, string syntPort, string clientPort, 
     bool foundMyself = false;
     int status, numControllers = 1;
     char myHostName[HOST_NAME_LEN];
-    vector<string> hostNames;
+    map<uint32_t, string> hostNameMap;
     ifstream hostfile(hostFilePath);
     SyntController *controller = NULL;
-
-    hostNames.push_back("Dummy"); // Pushing a dummy string to start server ids from 1.
 
     if(hostfile.is_open()) {
         if((status = gethostname(myHostName, HOST_NAME_LEN)) != 0) {
@@ -174,7 +172,7 @@ SyntController *bootstrap(string paxosPort, string syntPort, string clientPort, 
             string hostName;
             getline(hostfile, hostName);
             if(!hostName.empty()) {
-                hostNames.push_back(hostName);
+                hostNameMap[numControllers] = hostName;
                 if(strcmp(myHostName, hostName.c_str()) == 0) {
                     *myId = numControllers;
                     foundMyself = true;
@@ -191,7 +189,7 @@ SyntController *bootstrap(string paxosPort, string syntPort, string clientPort, 
         if(syntInfo) {
             syntInfo->myId = *myId;
             syntInfo->numControllers = numControllers;
-            syntInfo->hostNames = hostNames;
+            syntInfo->hostNameMap = hostNameMap;
             syntInfo->paxosPort = paxosPort;
             syntInfo->syntListenPort = syntPort;
             syntInfo->clientListenPort = clientPort;

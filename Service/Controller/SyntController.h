@@ -45,12 +45,14 @@
 #define DELETE 6
 #define SYNC 7
 
-#define TYPE_PAXOS_UPDATE 1
-#define TYPE_SYNT_MESSAGE 2
-#define TYPE_HEARTBEAT 3
+#define ORDERED_UPDATE 1
+#define UNORDERED_UPDATE 2
+#define NEW_UPDATE 3
+#define OLD_UPDATE 4
 
 #define SEC_TO_MICROSEC 1000000
 #define SEND_TIMEOUT 2 // In seconds.
+#define ACK_TIMEOUT 5  // In seconds.
 
 typedef std::pair<uint32_t, uint32_t> UpdatePair;  // (id, timestamp)
 typedef std::pair<int, SyntMessage *> RequestPair; // (socket, request)
@@ -61,13 +63,14 @@ class SyntController {
         /* Private Variables. */
         /**********************/
 
-        uint32_t myId;                      // My unique id.
-        uint32_t numControllers;            // Number of controllers in the system.
-//        uint32_t updateTimestamp;           // Increasing timestamp counter for Paxos updates.
-        std::vector<std::string> hostNames; // Vector of host names of other controllers.
-        fd_set masterReadList;              // Master list of client sockets to read from.
-        pthread_mutex_t masterReadListLock; // Mutex variable for masterReadList.
-        DataTree dataTree;                  // In-memory data store object.
+        uint32_t myId;                               // My unique id.
+        uint32_t numControllers;                     // Number of controllers in the system.
+        pthread_mutex_t numControllersLock;          // Mutex variable for numControllers.
+        std::map<uint32_t, std::string> hostNameMap; // Map of (Id : Hostname of controller).
+        pthread_mutex_t hostNameMapLock;             // Mutex variable for hostNameMap.
+        fd_set masterReadList;                       // Master list of client session sockets.
+        pthread_mutex_t masterReadListLock;          // Mutex variable for masterReadList.
+        DataTree dataTree;                           // In-memory data store object.
 
         std::string paxosPort;        // Paxos's port to use for making a TCP connection.
         std::string syntListenPort;   // Port to listen for peer Synt Controller UDP connections.
@@ -82,11 +85,15 @@ class SyntController {
         std::set<int> clientSocketSet;
         pthread_mutex_t clientSocketSetLock;
 
-        // Map of (Client Update : Client Session Socket) and the mutex for it. 
+        // Map of (Client Update : Client Session Socket) and its mutex. 
         std::map<UpdatePair, int> clientUpdateSocketMap;
         pthread_mutex_t clientUpdateSocketMapLock;
         
-        // Map of (Client Update : Client Request already sent to Paxos) and the mutex for it.
+        // Map of (Client Update : Result of client request ordered by Paxos) and its mutex.
+        std::map<UpdatePair, uint32_t> orderedRequestMap;
+        pthread_mutex_t orderedRequestMapLock;
+        
+        // Map of (Client Update : Client Request sent to Paxos) and its mutex.
         std::map<UpdatePair, SyntMessage *> unorderedRequestMap;
         pthread_mutex_t unorderedRequestMapLock;
         
@@ -95,7 +102,7 @@ class SyntController {
         pthread_mutex_t pendingClientRequestsQueueLock;
         pthread_cond_t queueNotEmptyCondition;
 
-        // Set of unapplied ordered Paxos updates and the mutex for it.
+        // Set of unapplied ordered Paxos updates and its mutex.
         std::set<UpdatePair> paxosUpdateSet;
         pthread_mutex_t paxosUpdateSetLock;
         
@@ -141,6 +148,15 @@ class SyntController {
 
         // Handles clients' write requests.
         void *handleWriteRequests(SyntMessage *, int);
+        
+        // Decides on the state of the client request.
+        uint16_t checkWriteRequest(UpdatePair); 
+        
+        // Check if an update's timestamp is old and rejects it.
+        bool isUpdateOld(UpdatePair);
+   
+        // Handles messages from Paxos.
+        void *handlePaxos(void);
     
         // Updates the data structures before a request is sent to Paxos to be ordered.
         void orderRequest();
@@ -154,23 +170,29 @@ class SyntController {
         // Sends a message to a host via UDP.
         bool sendMessage(void *, uint32_t, std::string);   
     
+        // Wait for Acks from all controller for the sent update.
+        void waitForAcks(SyntMessage *);
+        
         // Constructs and returns and PaxosUpdate.
         PaxosUpdate *constructPaxosUpdate(UpdatePair);
 
         // Sends an update to Paxos.
         void sendUpdateToPaxos(PaxosUpdate *);
 
-        // Handles messages from Paxos.
-        void *handlePaxos(void);
-
         // Serves the write request corresponding to the Paxos update that has been ordered.
         void applyWriteUpdate(UpdatePair);
+        
+        // Removes all old buffered requests from the same client.
+        void cleanUpOldOrderedRequests(UpdatePair);
 
         // Performs write on the in-memory data store depending on the type of request.
         uint32_t writeToDataTree(SyntMessage *);
 
         // Handles messages from peer Synt controllers.
         void *handleSynt(void);
+        
+        // Sends an Ack in response to a SyntMessage received.
+        void sendAckToController(struct sockaddr_in *, SyntMessage *);
 
         // Handles heartbeat messages and replies with "I am alive".
         void *handleHeartbeat(void);
