@@ -503,8 +503,17 @@ void* SyntController::handleWriteRequests(SyntMessage *syntRequest, int clientSo
     UpdatePair paxosUpdate(syntRequest->clientId, syntRequest->timestamp);
     uint16_t updateState = checkWriteRequest(paxosUpdate);
 
+#ifdef DEBUG
+cout<<"\nGot write request from client.";
+cout.flush();
+#endif
+
     switch(updateState) {
         case ORDERED_UPDATE:
+#ifdef DEBUG
+cout<<"\nIt is an ORDERED request.";
+cout.flush();
+#endif
             {
                 // Fetch the result of the executed update.
                 pthread_mutex_lock(&(this->orderedRequestMapLock));
@@ -517,9 +526,17 @@ void* SyntController::handleWriteRequests(SyntMessage *syntRequest, int clientSo
             break;
 
         case UNORDERED_UPDATE:
+#ifdef DEBUG
+cout<<"\nIt is an UNORDERED request.";
+cout.flush();
+#endif
             break; // Nothing to do. Just wait till the update gets ordered.
 
         case NEW_UPDATE:
+#ifdef DEBUG
+cout<<"\nIt is a NEW request.";
+cout.flush();
+#endif
             {
                 bool isQueueEmpty = false;
 
@@ -532,7 +549,7 @@ void* SyntController::handleWriteRequests(SyntMessage *syntRequest, int clientSo
                 this->pendingClientRequestsQueue.push(make_pair(clientSocket, syntRequest));
                 if(isQueueEmpty) {
 #ifdef DEBUG
-                    cout<<"\nQueue was empty. Going signal queueNotEmpty."; 
+cout<<"\nQueue was empty. Going signal queueNotEmpty."; 
 #endif
                     pthread_cond_signal(&(this->queueNotEmptyCondition));
                 }
@@ -541,6 +558,10 @@ void* SyntController::handleWriteRequests(SyntMessage *syntRequest, int clientSo
             break;
 
         case OLD_UPDATE:
+#ifdef DEBUG
+cout<<"\nIt is an OLD request.";
+cout.flush();
+#endif
             {
                 uint32_t result = 0; // Set result to failure.
                 respondToClient(syntRequest, (char *) &result, sizeof(result), clientSocket);
@@ -640,24 +661,25 @@ void SyntController::orderRequest() {
     bool updated = updateDataStructures(paxosUpdate);
     
     if(updated) {
-	    // Send the client request to peer Synt controllers.
-	    SyntMessage *syntRequest = this->unorderedRequestMap[paxosUpdate];
-	    uint32_t syntRequestLength = sizeof(SyntMessage) + syntRequest->dataLength;
-	    hton(syntRequest, TYPE_SYNT_MESSAGE); // Convert from host to network byte order.
-	    sendSyntMessageToControllers(syntRequest, syntRequestLength); 
-	    ntoh(syntRequest, TYPE_SYNT_MESSAGE); // Convert back.
-        waitForAcks(syntRequest);             // Wait for Acks for the sent message.
-	    
-#ifdef DEBUG
-cout<<"\n=============================";
-cout<<"\nPaxos update will be sent with timestamp = "<<paxosUpdate.second<<" and clientId = "<<paxosUpdate.first;
-cout<<"\n=============================";
-cout.flush();
-#endif
-	    // Send the update to Paxos to be ordered.
-	    PaxosUpdate *paxosUpdateMessage = constructPaxosUpdate(paxosUpdate);
-	    sendUpdateToPaxos(paxosUpdateMessage);
-	    delete paxosUpdateMessage;
+	// Send the client request to peer Synt controllers.
+	SyntMessage *syntRequest = this->unorderedRequestMap[paxosUpdate];
+	uint32_t syntRequestLength = sizeof(SyntMessage) + syntRequest->dataLength;
+	hton(syntRequest, TYPE_SYNT_MESSAGE); // Convert from host to network byte order.
+	sendSyntMessageToControllers(syntRequest, syntRequestLength); 
+	ntoh(syntRequest, TYPE_SYNT_MESSAGE); // Convert back.
+	
+	waitForAcks(syntRequest);             // Wait for Acks for the sent message.
+
+	#ifdef DEBUG
+	cout<<"\n=============================";
+	cout<<"\nPaxos update will be sent with timestamp = "<<paxosUpdate.second<<" and clientId = "<<paxosUpdate.first;
+	cout<<"\n=============================";
+	cout.flush();
+	#endif
+	// Send the update to Paxos to be ordered.
+	PaxosUpdate *paxosUpdateMessage = constructPaxosUpdate(paxosUpdate);
+	sendUpdateToPaxos(paxosUpdateMessage);
+	delete paxosUpdateMessage;
     }
 }
 
@@ -694,7 +716,7 @@ bool SyntController::updateDataStructures(UpdatePair &paxosUpdate) {
         this->unorderedRequestMap[paxosUpdate] = syntRequest;
         pthread_mutex_unlock(&(this->unorderedRequestMapLock));
     } else {
-    	updated = false;
+	updated = false;
     }
     pthread_mutex_unlock(&(this->pendingClientRequestsQueueLock));
 
@@ -800,30 +822,40 @@ void SyntController::waitForAcks(SyntMessage *syntRequest) {
     uint32_t ackCount = 0, controllerCount;
 
     do {
-        SyntMessageAck ack;
-        struct sockaddr peerAddress;
+        // Peek into the message to find the size of the message.
+        SyntMessage updatePeek;
+        struct sockaddr_in peerAddress;
         socklen_t addrLen = sizeof(peerAddress);
-        int numBytesRecvd = recvfrom(this->syntListenSocket, (void *) &ack, sizeof(SyntMessageAck), 0, &peerAddress, &addrLen);
-
-        if(numBytesRecvd > 0) {
-            ntoh(&ack, TYPE_SYNT_MESSAGE_ACK); // Convert from network to host byte order.
-
-            if(this->hostNameMap.count(ack.serverId) == 1 && ack.clientId == syntRequest->clientId && ack.timestamp == syntRequest->timestamp) { // If the ack is valid.
-#ifdef DEBUG
-    pthread_mutex_lock(&(this->hostNameMapLock));
-    cout<<"\nReceived valid ack from "<<this->hostNameMap[ack.serverId]; 
-    pthread_mutex_unlock(&(this->hostNameMapLock));
-    cout.flush();
-#endif
-                ++ackCount;
-            }
-        }
+        int numBytesRecvd = recvfrom(this->syntListenSocket, (void *) &updatePeek, sizeof(SyntMessage), MSG_PEEK, (sockaddr *) &peerAddress, &addrLen);
         
-        // Find the current number of controllers.
-        pthread_mutex_lock(&(this->numControllersLock));
-        controllerCount = this->numControllers - 1;
-        pthread_mutex_unlock(&(this->numControllersLock));
-    } while(ackCount < controllerCount);
+        if(numBytesRecvd == sizeof(SyntMessageAck)) {
+			SyntMessageAck ack;
+			numBytesRecvd = recvfrom(this->syntListenSocket, (void *) &ack, sizeof(SyntMessageAck), 0, (sockaddr *) &peerAddress, &addrLen);
+
+			if(numBytesRecvd > 0) {
+				ntoh(&ack, TYPE_SYNT_MESSAGE_ACK); // Convert from network to host byte order.
+
+				if(this->hostNameMap.count(ack.serverId) == 1 && ack.clientId == syntRequest->clientId && ack.timestamp == syntRequest->timestamp) { // If the ack is valid.
+#ifdef DEBUG
+cout<<"\nReceived valid ack from "<<ack.serverId; 
+cout.flush();
+#endif
+					++ackCount;
+				}
+			}
+
+			// Find the current number of controllers.
+			pthread_mutex_lock(&(this->numControllersLock));
+			controllerCount = this->numControllers - 1;
+			pthread_mutex_unlock(&(this->numControllersLock));
+#ifdef DEBUG
+cout<<"\nCountroller count = "<<controllerCount; 
+cout.flush();
+#endif
+		} else if(numBytesRecvd == sizeof(SyntMessage)) {
+			sleep(100);
+		}
+	} while(ackCount < controllerCount);
 }
 
 // Constructs and returns and PaxosUpdate.
@@ -971,10 +1003,10 @@ cout.flush();
         socklen_t addrLen = sizeof(peerAddress);
         int numBytesRecvd = recvfrom(this->syntListenSocket, (void *) &updatePeek, sizeof(SyntMessage), MSG_PEEK, (sockaddr *) &peerAddress, &addrLen);
         
-        if(numBytesRecvd > 0) {
+        if(numBytesRecvd == sizeof(SyntMessage)) {
 #ifdef DEBUG
-cout<<"\nGot an update from a peer.";
-cout.flush();
+//cout<<"\nGot an update from a peer.";
+//cout.flush();
 #endif
             ntoh(&updatePeek, TYPE_SYNT_MESSAGE); // Network to host byte order.
             
@@ -984,15 +1016,15 @@ cout.flush();
             numBytesRecvd = recvfrom(this->syntListenSocket, (void *) syntRequest, syntRequestSize, 0, (sockaddr *) &peerAddress, &addrLen);
 
 #ifdef DEBUG
-cout<<"\nRead an update from a peer.";
-cout.flush();
+//cout<<"\nRead an update from a peer.";
+//cout.flush();
 #endif
             if(numBytesRecvd > 0) {
                 ntoh(syntRequest, TYPE_SYNT_MESSAGE);           // Network to host byte order.
-                sendAckToController(&peerAddress, syntRequest); // Acknowledge the update.
+		sendAckToController(&peerAddress, syntRequest); // Acknowledge the update.
 #ifdef DEBUG
-cout<<"\nPathLength from peer: "<<syntRequest->pathLength;
-cout.flush();
+//cout<<"\nPathLength from peer: "<<syntRequest->pathLength;
+//cout.flush();
 #endif
                 // Create the request/update's key.
                 UpdatePair paxosUpdate(syntRequest->clientId, syntRequest->timestamp);
@@ -1012,7 +1044,9 @@ cout.flush();
             } 
         } else if(numBytesRecvd < 0) {
             perror("\nError while receiving message: recv() failed.");
-        } 
+        } else if(numBytesRecvd == sizeof(SyntMessageAck)) {
+	    sleep(100);
+	}
     }
     pthread_exit(0);
 }
@@ -1022,13 +1056,13 @@ void SyntController::sendAckToController(struct sockaddr_in *sourceAddress, Synt
     SyntMessageAck ack;
     
     // Prepare the address to send to.
-    sockaddr_in destAddress;
+    struct sockaddr_in destAddress;
     destAddress.sin_family = AF_INET;
     destAddress.sin_port = htons((uint16_t) atoi(this->syntListenPort.c_str()));
     memcpy(&(destAddress.sin_addr), &(sourceAddress->sin_addr), sizeof(destAddress.sin_addr));
 
     // Prepare the ack and convert to network byte order.
-    ack.serverId = myId;
+    ack.serverId = this->myId;
     ack.clientId = syntRequest->clientId;
     ack.timestamp = syntRequest->timestamp;
     hton(&ack, TYPE_SYNT_MESSAGE_ACK);
@@ -1039,6 +1073,10 @@ void SyntController::sendAckToController(struct sockaddr_in *sourceAddress, Synt
         cerr<<"Sending Ack for (clientId, timestamp) = ("<<syntRequest->clientId<<", "<<syntRequest->timestamp<<").";
         perror("\nError while sending ack message: sendto() failed.");
     }
+#ifdef DEBUG
+cout<<"\nSent Ack to with numBytes = "<<numBytesSent;
+cout.flush();
+#endif
 }
 
 // Handles heartbeat messages and replies with "I am alive".
@@ -1058,6 +1096,10 @@ cout.flush();
             ntoh(&heartbeat, type); // Convert from network to host byte order.
             
             if(type == TYPE_HEARTBEAT_CHECK) {
+#ifdef DEBUG
+//cout<<"\nGot heartbeat check message.";
+//cout.flush();
+#endif
                 // Build the address to send to.
                 sockaddr_in destAddress;
                 destAddress.sin_family = AF_INET;
@@ -1076,15 +1118,25 @@ cout.flush();
                     perror("\nError while sending heartbeat message: sendto() failed.");
                 }
             } else if(type == TYPE_HEARTBEAT_DELETE_SERVER) {
+#ifdef DEBUG
+cout<<"\nGot heartbeat delete message.";
+cout.flush();
+#endif
                 // Locking numController inside hostNameMap. The map should be updated together with the count.
                 pthread_mutex_lock(&(this->hostNameMapLock));
+                pthread_mutex_lock(&(this->numControllersLock));
                 
                 this->hostNameMap.erase(heartbeat.serverId);     // Remove the server from the list of servers.
-                
-                pthread_mutex_lock(&(this->numControllersLock));
+#ifdef DEBUG
+cout<<"\nDelete server id = "<<heartbeat.serverId;
+cout.flush();
+#endif
                 --(this->numControllers);                        // Update the current number of controllers.
+#ifdef DEBUG
+cout<<"\nNumber of controllers now is = "<<this->numControllers;
+cout.flush();
+#endif
                 pthread_mutex_unlock(&(this->numControllersLock));
-                
                 pthread_mutex_unlock(&(this->hostNameMapLock));
         
             } else {
@@ -1137,10 +1189,10 @@ void SyntController::hton(void *message, uint32_t messageType) {
 
         case TYPE_HEARTBEAT_CHECK:
         case TYPE_HEARTBEAT_DELETE_SERVER:
-	    {
-	        Heartbeat *heartbeat = (Heartbeat *) message;
-		    heartbeat->serverId = htonl(heartbeat->serverId);
-	    }
+		{
+		Heartbeat *heartbeat = (Heartbeat *) message;
+			heartbeat->serverId = htonl(heartbeat->serverId);
+		}
         break;
 
         default:
@@ -1185,10 +1237,10 @@ void SyntController::ntoh(void *message, uint32_t messageType) {
 
         case TYPE_HEARTBEAT_CHECK:
         case TYPE_HEARTBEAT_DELETE_SERVER:
-	    {
-	        Heartbeat *heartbeat = (Heartbeat *) message;
-		    heartbeat->serverId = ntohl(heartbeat->serverId);
-	    }
+		{
+		Heartbeat *heartbeat = (Heartbeat *) message;
+			heartbeat->serverId = ntohl(heartbeat->serverId);
+		}
         break;
 
         default:

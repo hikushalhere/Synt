@@ -158,7 +158,7 @@ void printUsage() {
 
 SyntController *bootstrap(string paxosPort, string syntPort, string clientPort, string heartbeatPort, char *hostFilePath, uint32_t *myId) {
     bool foundMyself = false;
-    int status, numControllers = 1;
+    int status, numControllers = 0;
     char myHostName[HOST_NAME_LEN];
     map<uint32_t, string> hostNameMap;
     ifstream hostfile(hostFilePath);
@@ -172,12 +172,12 @@ SyntController *bootstrap(string paxosPort, string syntPort, string clientPort, 
             string hostName;
             getline(hostfile, hostName);
             if(!hostName.empty()) {
+                ++numControllers;
                 hostNameMap[numControllers] = hostName;
                 if(strcmp(myHostName, hostName.c_str()) == 0) {
                     *myId = numControllers;
                     foundMyself = true;
                 }
-                ++numControllers;
             }
         }
         hostfile.close();

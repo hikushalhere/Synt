@@ -322,6 +322,7 @@ void execute_client_update(Client_Update *cu, uint32_t seq) {
 	reply_u.timestamp = htonl(cu->timestamp);
 	reply_u.update = htonl(cu->update);
 
+	sleep(5);
 	send(zookeeper_socket, &reply_u, sizeof(Client_Update), 0);
 
 	//Last_Executed[cu->client_id] = cu->timestamp;
