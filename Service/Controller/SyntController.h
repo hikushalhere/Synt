@@ -6,7 +6,7 @@
 #include <iostream>
 #include <string>
 #include <map>
-#include <vector>
+#include <list>
 #include <queue>
 #include <set>
 #include <cstdio>
@@ -73,18 +73,20 @@ class SyntController {
         DataTree dataTree;                           // In-memory data store object.
 
         std::string paxosPort;        // Paxos's port to use for making a TCP connection.
-        std::string syntListenPort;   // Port to listen for peer Synt Controller UDP connections.
+        std::string syntMessagePort;  // Port to listen for controller's SyntMessage.
+        std::string syntAckPort;      // Port to listen for controller's Acks.
         std::string clientListenPort; // Port to listen for Clients' TCP connections.
         std::string heartbeatPort;    // Port to listen for Heartbeat messages.
         int paxosSocket;              // TCP socket for communicating with Paxos.
-        int syntListenSocket;         // UDP socket for receiving connections from peers.
+        int syntMessageSocket;        // UDP socket for receiving and sending messages to peers.
+        int syntAckSocket;            // UDP socket for receiving and sending akcs to peers.
         int clientListenSocket;       // TCP socket for accepting connections from Client.
         int heartbeatSocket;          // UDP socket for receving heartbeat messages.
 
-        // Set of client sockets to maintain all the client connections.
-        std::set<int> clientSocketSet;
-        pthread_mutex_t clientSocketSetLock;
-
+        // Map of (Client Session Socket : Client Id) and its mutex. 
+        std::map<int, uint32_t> clientIdMap;
+        pthread_mutex_t clientIdMapLock;
+        
         // Map of (Client Update : Client Session Socket) and its mutex. 
         std::map<UpdatePair, int> clientUpdateSocketMap;
         pthread_mutex_t clientUpdateSocketMapLock;
@@ -96,6 +98,10 @@ class SyntController {
         // Map of (Client Update : Client Request sent to Paxos) and its mutex.
         std::map<UpdatePair, SyntMessage *> unorderedRequestMap;
         pthread_mutex_t unorderedRequestMapLock;
+
+        // Map of (Client socket : List of Ephemeral nodes) and it mutex.
+        std::map<int, std::list<std::string> > ephemeralNodeMap;
+        pthread_mutex_t ephemeralNodeMapLock;
         
         // Queue of pending client requests, the mutex and condition variable for it.
         std::queue<RequestPair> pendingClientRequestsQueue;

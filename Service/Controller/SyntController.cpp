@@ -9,13 +9,15 @@ SyntController::SyntController(SyntInfo *info) {
     this->numControllers = info->numControllers;
     this->hostNameMap = info->hostNameMap;
     this->paxosPort = info->paxosPort;
-    this->syntListenPort = info->syntListenPort;
+    this->syntMessagePort = info->syntMessagePort;
+    this->syntAckPort = info->syntAckPort;
     this->clientListenPort = info->clientListenPort;
     this->heartbeatPort = info->heartbeatPort;
 
     // Set up the  network sockets.
     this->paxosSocket = establishConnection(PAXOS_HOST, this->paxosPort);
-    this->syntListenSocket = startListening(this->syntListenPort, SOCK_DGRAM);
+    this->syntMessageSocket = startListening(this->syntMessagePort, SOCK_DGRAM);
+    this->syntAckSocket = startListening(this->syntAckPort, SOCK_DGRAM);
     this->clientListenSocket = startListening(this->clientListenPort, SOCK_STREAM);
     this->heartbeatSocket = startListening(this->heartbeatPort, SOCK_DGRAM);
     FD_ZERO(&this->masterReadList);
@@ -35,9 +37,10 @@ SyntController::SyntController(SyntInfo *info) {
     pthread_mutex_init(&(this->numControllersLock), NULL);
     pthread_mutex_init(&(this->hostNameMapLock), NULL);
     pthread_mutex_init(&(this->masterReadListLock), NULL);
-    pthread_mutex_init(&(this->clientSocketSetLock), NULL);
+    pthread_mutex_init(&(this->clientIdMapLock), NULL);
     pthread_mutex_init(&(this->clientUpdateSocketMapLock), NULL);
     pthread_mutex_init(&(this->orderedRequestMapLock), NULL);
+    pthread_mutex_init(&(this->ephemeralNodeMapLock), NULL);
     pthread_mutex_init(&(this->unorderedRequestMapLock), NULL);
     pthread_mutex_init(&(this->pendingClientRequestsQueueLock), NULL);
     pthread_mutex_init(&(this->paxosUpdateSetLock), NULL);
@@ -208,7 +211,7 @@ void* SyntController::handleClients(void) {
         } else {
             for(int fd = 0; fd <= maxFD; ++fd) { // Run through the existing connections for the data to be read
                 if(FD_ISSET(fd, &readList)) { // Got something to read from a file descriptor we are monitoring.
-                    if(fd == 0 || fd == this->syntListenSocket || fd == this->paxosSocket) { // Ignore these file descriptors.
+                    if(fd == 0 || fd == this->syntMessageSocket || fd == this->paxosSocket) { // Ignore these file descriptors.
                         continue;
                     } else if(fd == this->clientListenSocket) { // Got a connection request from a client.
                         struct sockaddr_in clientAddress;
@@ -230,24 +233,34 @@ void* SyntController::handleClients(void) {
                         }
                     } else { // Got a message from a client.
                         #ifdef DEBUG
-			cout<<"\nGot a message at client socket: "<<fd;
-			#endif
-			// Peek into the message to find the size of the message.
+                        cout<<"\nGot a message at client socket: "<<fd;
+                        #endif
+                        // Peek into the message to find the size of the message.
                         SyntMessage requestPeek;
                         int numBytesRecvd = recv(fd, (void *) &requestPeek, sizeof(SyntMessage), MSG_PEEK);
                         
                         if(numBytesRecvd > 0) {
                             ntoh(&requestPeek, TYPE_SYNT_MESSAGE); // Network to host byte order.
                             uint32_t syntRequestSize = sizeof(SyntMessage) + requestPeek.dataLength;
-                        #ifdef DEBUG
-			cout<<"\nGot a message with request size = "<<syntRequestSize<<" and data length = "<<requestPeek.dataLength;
-			#endif
+                            #ifdef DEBUG
+                            cout<<"\nGot a message with request size = "<<syntRequestSize<<" and data length = "<<requestPeek.dataLength;
+                            #endif
                             SyntMessage *syntRequest = (SyntMessage *) malloc(syntRequestSize);
                             numBytesRecvd = recv(fd, (void *) syntRequest, syntRequestSize, 0);
 
                             if(numBytesRecvd > 0) {
-                                ntoh(syntRequest, TYPE_SYNT_MESSAGE); // Network to host byte order.
-                                handleClientRequest(syntRequest, fd); // Handle the client's request.
+                                // Network to host byte order.
+                                ntoh(syntRequest, TYPE_SYNT_MESSAGE);
+                                
+                                // Insert into clientIdMap if this is the first connection
+                                pthread_mutex_lock(&(this->clientIdMapLock));
+                                if(this->clientIdMap.count(fd) == 0) {
+                                    this->clientIdMap[fd] = syntRequest->clientId;
+                                }
+                                pthread_mutex_unlock(&(this->clientIdMapLock));
+                                
+                                // Handle the client's request.
+                                handleClientRequest(syntRequest, fd);
                             } else if(numBytesRecvd == 0) { // Client closed the connection.
                                 deleteClientState(fd);
                             } else {
@@ -255,11 +268,6 @@ void* SyntController::handleClients(void) {
                             }
                         } else if(numBytesRecvd == 0) { // Client closed the connection.
                             deleteClientState(fd);
-                            
-                            // Remove the client socket into the masterReadList.
-                            pthread_mutex_lock(&(this->masterReadListLock));
-                            FD_CLR(fd, &this->masterReadList);
-                            pthread_mutex_unlock(&(this->masterReadListLock));
                         } else {
                             perror("\nError while receving a message from the client: recv() failed.");
                         }
@@ -274,9 +282,31 @@ void* SyntController::handleClients(void) {
 
 // Deletes the state about the client - session socket and all pending requests.
 void SyntController::deleteClientState(int clientSocket) {
-    queue<RequestPair> tempRequestQueue;
+    // Remove the client socket into the masterReadList.
+    pthread_mutex_lock(&(this->masterReadListLock));
+    FD_CLR(clientSocket, &this->masterReadList);
+    pthread_mutex_unlock(&(this->masterReadListLock));
     
+    // Get the client id and erase from the socket clientIdMap.
+    pthread_mutex_lock(&(this->clientIdMapLock));
+    uint32_t clientId = this->clientIdMap[clientSocket];
+    this->clientIdMap.erase(clientId);
+    pthread_mutex_unlock(&(this->clientIdMapLock));
+
+    // Delete the ephemeral nodes.
+    list<string> nodeList;
+    pthread_mutex_lock(&(this->ephemeralNodeMapLock));
+    if(this->ephemeralNodeMap.count(clientId) == 1) {
+        nodeList = this->ephemeralNodeMap[clientId];
+        this->ephemeralNodeMap.erase(clientId);
+    }
+    pthread_mutex_unlock(&(this->ephemeralNodeMapLock));
+    for(list<string>::iterator iter = nodeList.begin(); iter != nodeList.end(); ++iter) {
+        this->dataTree.deleteNode(*iter, 1); // Hard coding because we are just doing it for Lock Service now.
+    }
+
     // Clear all pending requests from the client and keep the rest.
+    queue<RequestPair> tempRequestQueue;
     pthread_mutex_lock(&(this->pendingClientRequestsQueueLock));
     while(!this->pendingClientRequestsQueue.empty()) {
         RequestPair request = this->pendingClientRequestsQueue.front();
@@ -293,12 +323,12 @@ void SyntController::deleteClientState(int clientSocket) {
     this->pendingClientRequestsQueue = tempRequestQueue; // Store the new queue.
     pthread_mutex_unlock(&(this->pendingClientRequestsQueueLock));
 
-    // Remove the socket from clientUpdateSocketMap and the corresponding any unordered request.
+    // Remove the socket from clientUpdateSocketMap and the corresponding unordered requests.
     pthread_mutex_lock(&(this->clientUpdateSocketMapLock));
-    for(map<UpdatePair, int>::iterator iter = this->clientUpdateSocketMap.begin(); iter != this->clientUpdateSocketMap.end(); ++iter) {
+    for(map<UpdatePair, int>::iterator iter = this->clientUpdateSocketMap.begin(); iter != this->clientUpdateSocketMap.end();) {
         if(iter->second == clientSocket) {
-            UpdatePair paxosUpdate = iter->first; // The unique key of the update sent to Paxos.
-            this->clientUpdateSocketMap.erase(iter);    // Erase from the client socket map.
+            UpdatePair paxosUpdate = iter->first;      // Unique key of update sent to Paxos.
+            this->clientUpdateSocketMap.erase(iter++); // Erase from the client socket map.
 
             // Remove the unordered request from unorderedRequestMap.
             SyntMessage *syntRequest = NULL;
@@ -313,14 +343,11 @@ void SyntController::deleteClientState(int clientSocket) {
             if(syntRequest) {
                 free(syntRequest);
             }
+        } else {
+            ++iter;
         }
     }
     pthread_mutex_unlock(&(this->clientUpdateSocketMapLock));
-
-    // Remove the client socket from the clientSocketSet
-    pthread_mutex_lock(&(this->clientSocketSetLock));
-    this->clientSocketSet.erase(clientSocket);
-    pthread_mutex_unlock(&(this->clientSocketSetLock));
 }
 
 // Handles a read or write request by sending it to a handler in a new thread.
@@ -784,7 +811,7 @@ bool SyntController::sendMessage(void *msg, uint32_t msgSize, string hostname) {
     hint.ai_flags = AI_PASSIVE;
 
     // Get the address info of the host to send to.
-    if((status = getaddrinfo(hostname.c_str(), this->syntListenPort.c_str(), &hint, &hostInfo)) != 0) {
+    if((status = getaddrinfo(hostname.c_str(), this->syntMessagePort.c_str(), &hint, &hostInfo)) != 0) {
         cerr<<"\ngetaddrinfo: "<<gai_strerror(status);
         sendStatus = NOT_SENT;
     } else {
@@ -823,14 +850,16 @@ void SyntController::waitForAcks(SyntMessage *syntRequest) {
 
     do {
         // Peek into the message to find the size of the message.
-        SyntMessage updatePeek;
+        /*SyntMessage updatePeek;
         struct sockaddr_in peerAddress;
         socklen_t addrLen = sizeof(peerAddress);
-        int numBytesRecvd = recvfrom(this->syntListenSocket, (void *) &updatePeek, sizeof(SyntMessage), MSG_PEEK, (sockaddr *) &peerAddress, &addrLen);
+        int numBytesRecvd = recvfrom(this->syntAckSocket, (void *) &updatePeek, sizeof(SyntMessage), MSG_PEEK, (sockaddr *) &peerAddress, &addrLen);
         
-        if(numBytesRecvd == sizeof(SyntMessageAck)) {
+        if(numBytesRecvd == sizeof(SyntMessageAck)) {*/
 			SyntMessageAck ack;
-			numBytesRecvd = recvfrom(this->syntListenSocket, (void *) &ack, sizeof(SyntMessageAck), 0, (sockaddr *) &peerAddress, &addrLen);
+            struct sockaddr_in peerAddress;
+            socklen_t addrLen = sizeof(peerAddress);
+			uint32_t numBytesRecvd = recvfrom(this->syntAckSocket, (void *) &ack, sizeof(SyntMessageAck), 0, (sockaddr *) &peerAddress, &addrLen);
 
 			if(numBytesRecvd > 0) {
 				ntoh(&ack, TYPE_SYNT_MESSAGE_ACK); // Convert from network to host byte order.
@@ -852,9 +881,9 @@ cout.flush();
 cout<<"\nCountroller count = "<<controllerCount; 
 cout.flush();
 #endif
-		} else if(numBytesRecvd == sizeof(SyntMessage)) {
+		/*} else if(numBytesRecvd == sizeof(SyntMessage)) {
 			sleep(100);
-		}
+		}*/
 	} while(ackCount < controllerCount);
 }
 
@@ -967,6 +996,11 @@ cout<<"\nCreate request. Flag is = "<<flags;
 cout.flush();
 #endif
             status = dataTree.createNode(path, writeData, writeDataSize, flags);
+            if(status != 0 && flags & NODE_EPHEMERAL) {
+                pthread_mutex_lock(&(this->ephemeralNodeMapLock));
+                this->ephemeralNodeMap[syntRequest->clientId].push_back(path);
+                pthread_mutex_unlock(&(this->ephemeralNodeMapLock));
+            }
             break;
 
         case SET_DATA:
@@ -977,6 +1011,10 @@ cout.flush();
         case DELETE:
             version = syntRequest->uint32Value;
             status = dataTree.deleteNode(path, version);
+            break;
+        
+        case SYNC:
+            status = 1;
             break;
         
         default:
@@ -1001,7 +1039,7 @@ cout.flush();
         SyntMessage updatePeek;
         struct sockaddr_in peerAddress;
         socklen_t addrLen = sizeof(peerAddress);
-        int numBytesRecvd = recvfrom(this->syntListenSocket, (void *) &updatePeek, sizeof(SyntMessage), MSG_PEEK, (sockaddr *) &peerAddress, &addrLen);
+        int numBytesRecvd = recvfrom(this->syntMessageSocket, (void *) &updatePeek, sizeof(SyntMessage), MSG_PEEK, (sockaddr *) &peerAddress, &addrLen);
         
         if(numBytesRecvd == sizeof(SyntMessage)) {
 #ifdef DEBUG
@@ -1013,7 +1051,7 @@ cout.flush();
             // Receive message from a peer controller in a buffer.
             uint32_t syntRequestSize = sizeof(SyntMessage) + updatePeek.dataLength;
             SyntMessage *syntRequest = (SyntMessage *) malloc(syntRequestSize);
-            numBytesRecvd = recvfrom(this->syntListenSocket, (void *) syntRequest, syntRequestSize, 0, (sockaddr *) &peerAddress, &addrLen);
+            numBytesRecvd = recvfrom(this->syntMessageSocket, (void *) syntRequest, syntRequestSize, 0, (sockaddr *) &peerAddress, &addrLen);
 
 #ifdef DEBUG
 //cout<<"\nRead an update from a peer.";
@@ -1021,7 +1059,7 @@ cout.flush();
 #endif
             if(numBytesRecvd > 0) {
                 ntoh(syntRequest, TYPE_SYNT_MESSAGE);           // Network to host byte order.
-		sendAckToController(&peerAddress, syntRequest); // Acknowledge the update.
+		        sendAckToController(&peerAddress, syntRequest); // Acknowledge the update.
 #ifdef DEBUG
 //cout<<"\nPathLength from peer: "<<syntRequest->pathLength;
 //cout.flush();
@@ -1058,7 +1096,7 @@ void SyntController::sendAckToController(struct sockaddr_in *sourceAddress, Synt
     // Prepare the address to send to.
     struct sockaddr_in destAddress;
     destAddress.sin_family = AF_INET;
-    destAddress.sin_port = htons((uint16_t) atoi(this->syntListenPort.c_str()));
+    destAddress.sin_port = htons((uint16_t) atoi(this->syntAckPort.c_str()));
     memcpy(&(destAddress.sin_addr), &(sourceAddress->sin_addr), sizeof(destAddress.sin_addr));
 
     // Prepare the ack and convert to network byte order.
@@ -1068,7 +1106,7 @@ void SyntController::sendAckToController(struct sockaddr_in *sourceAddress, Synt
     hton(&ack, TYPE_SYNT_MESSAGE_ACK);
 
     // Send the ack.
-    uint32_t numBytesSent = sendto(this->syntListenSocket, (void *) &ack, sizeof(SyntMessageAck), 0, (struct sockaddr *) &destAddress, sizeof(destAddress));
+    uint32_t numBytesSent = sendto(this->syntAckSocket, (void *) &ack, sizeof(SyntMessageAck), 0, (struct sockaddr *) &destAddress, sizeof(destAddress));
     if(numBytesSent < 0) {
         cerr<<"Sending Ack for (clientId, timestamp) = ("<<syntRequest->clientId<<", "<<syntRequest->timestamp<<").";
         perror("\nError while sending ack message: sendto() failed.");

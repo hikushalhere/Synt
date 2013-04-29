@@ -4,10 +4,12 @@
 
 #define NOP 0
 #define PAXOS_PORT 1
-#define SYNT_PORT 2
-#define CLIENT_PORT 3
-#define HEARTBEAT_PORT 4
-#define HOSTFILE 5
+#define SYNT_MESSAGE_PORT 2
+#define SYNT_ACK_PORT 3
+#define CLIENT_PORT 4
+#define HEARTBEAT_PORT 5
+#define HOSTFILE 6
+#define NUM_ARGUMENTS 6 // Must be equal to the the #arguments.
 
 #define MIN_PORT_NUM 1024
 #define MAX_PORT_NUM 65535
@@ -16,15 +18,20 @@
 
 using namespace std;
 
-SyntController *bootstrap(string, string, string, string, char *, uint32_t *);
+SyntController *bootstrap(string, string, string, string, string, char *, uint32_t *);
 void printUsage();
 
 int main(int argc, char **argv) {
-    int nextArg = NOP, paxosPortNum = NOP, syntPortNum = NOP, clientPortNum = NOP, heartbeatPortNum = NOP;
+    int nextArg = NOP, paxosPortNum, syntMessagePortNum, syntAckPortNum, clientPortNum, heartbeatPortNum;
     char *hostFilePath;
-    string paxosPort, syntPort, clientPort, heartbeatPort;
+    string paxosPort, syntMessagePort, syntAckPort, clientPort, heartbeatPort;
     bool proceed = true;
 
+    if(argc-1 != NUM_ARGUMENTS) {
+        proceed = false;
+    }
+
+    paxosPortNum = syntMessagePortNum = syntAckPortNum = clientPortNum = heartbeatPortNum = NOP;
     for(int i = 1; i < argc && proceed; i++) {
         if(argv[i][0] == '-') {
             if(strlen(argv[i]) != 2) {
@@ -38,7 +45,11 @@ int main(int argc, char **argv) {
                     break;
                 
                 case 's':
-                    nextArg = SYNT_PORT;
+                    nextArg = SYNT_MESSAGE_PORT;
+                    break;
+
+                case 'a':
+                    nextArg = SYNT_ACK_PORT;
                     break;
 
                 case 'c':
@@ -72,21 +83,39 @@ int main(int argc, char **argv) {
 		    #endif
                     break;
                 
-                case SYNT_PORT:
-                    syntPort = string(argv[i]);
-                    syntPortNum = atoi(argv[i]);
-                    if(syntPortNum < MIN_PORT_NUM || syntPortNum > MAX_PORT_NUM) {
+                case SYNT_MESSAGE_PORT:
+                    syntMessagePort = string(argv[i]);
+                    syntMessagePortNum = atoi(argv[i]);
+                    if(syntMessagePortNum < MIN_PORT_NUM || syntMessagePortNum > MAX_PORT_NUM) {
                         cerr<<"The port number should lie between 1024 and 65535 including both.";
                         proceed = false;
                         continue;
                     }
-                    if(syntPortNum == paxosPortNum || syntPortNum == heartbeatPortNum) {
-                        cerr<<"The Synt port number must not be the same as Client port number or Heartbeat port number.";
+                    if(syntMessagePortNum == paxosPortNum || syntMessagePortNum == syntAckPortNum || syntMessagePortNum == heartbeatPortNum) {
+                        cerr<<"The Synt Message port number must not be the same as Synt Ack port number or Client port number or Heartbeat port number.";
                         proceed = false;
                         continue;
                     }
 		    #ifdef DEBUG
-		    cout<<"\nSynt port is: "<<syntPort;
+		    cout<<"\nSynt message port is: "<<syntMessagePort;
+		    #endif
+                    break;
+                
+                case SYNT_ACK_PORT:
+                    syntAckPort = string(argv[i]);
+                    syntAckPortNum = atoi(argv[i]);
+                    if(syntAckPortNum < MIN_PORT_NUM || syntAckPortNum > MAX_PORT_NUM) {
+                        cerr<<"The port number should lie between 1024 and 65535 including both.";
+                        proceed = false;
+                        continue;
+                    }
+                    if(syntAckPortNum == paxosPortNum || syntAckPortNum == syntMessagePortNum || syntAckPortNum == heartbeatPortNum) {
+                        cerr<<"The Synt Ack port number must not be the same as Synt Message port number or Client port number or Heartbeat port number.";
+                        proceed = false;
+                        continue;
+                    }
+		    #ifdef DEBUG
+		    cout<<"\nSynt port is: "<<syntMessagePort;
 		    #endif
                     break;
 
@@ -98,8 +127,8 @@ int main(int argc, char **argv) {
                         proceed = false;
                         continue;
                     }
-                    if(clientPortNum == syntPortNum || clientPortNum == heartbeatPortNum) {
-                        cerr<<"The Client port number must not be the same as Synt port number or Heartbeat port number.";
+                    if(clientPortNum == syntMessagePortNum || clientPortNum == syntAckPortNum || clientPortNum == heartbeatPortNum) {
+                        cerr<<"The Client port number must not be the same as Synt Message port number or Synt Ack port number or Heartbeat port number.";
                         proceed = false;
                         continue;
                     }
@@ -116,8 +145,8 @@ int main(int argc, char **argv) {
                         proceed = false;
                         continue;
                     }
-                    if(heartbeatPortNum == syntPortNum || heartbeatPortNum == clientPortNum) {
-                        cerr<<"The Heartbeat port number must not be the same as Synt port number or Client port number.";
+                    if(heartbeatPortNum == syntMessagePortNum || heartbeatPortNum == syntAckPortNum || heartbeatPortNum == clientPortNum) {
+                        cerr<<"The Heartbeat port number must not be the same as Synt Message port number or Synt Ack port number or Client port number.";
                         proceed = false;
                         continue;
                     }
@@ -143,20 +172,22 @@ int main(int argc, char **argv) {
 
     if(proceed) {
         uint32_t myId;
-        SyntController *controller = bootstrap(paxosPort, syntPort, clientPort, heartbeatPort, hostFilePath, &myId);
+        SyntController *controller = bootstrap(paxosPort, syntMessagePort, syntAckPort, clientPort, heartbeatPort, hostFilePath, &myId);
         if(controller) {
             controller->start();
         }   
+    } else {
+        printUsage();
     }
 }
 
 void printUsage() {
     cout<<"Incorrect usage.";
-    cout<<"\nUsage: controller -h hostfile -p paxos_port -s synt_port -c client_port";
+    cout<<"\nUsage: controller -p paxos_port -s synt_message_port -a synt_ack_port -h heartbeat_port -c client_port -f host_file\n";
     cout.flush();
 }
 
-SyntController *bootstrap(string paxosPort, string syntPort, string clientPort, string heartbeatPort, char *hostFilePath, uint32_t *myId) {
+SyntController *bootstrap(string paxosPort, string syntMessagePort, string syntAckPort, string clientPort, string heartbeatPort, char *hostFilePath, uint32_t *myId) {
     bool foundMyself = false;
     int status, numControllers = 0;
     char myHostName[HOST_NAME_LEN];
@@ -191,7 +222,8 @@ SyntController *bootstrap(string paxosPort, string syntPort, string clientPort, 
             syntInfo->numControllers = numControllers;
             syntInfo->hostNameMap = hostNameMap;
             syntInfo->paxosPort = paxosPort;
-            syntInfo->syntListenPort = syntPort;
+            syntInfo->syntMessagePort = syntMessagePort;
+            syntInfo->syntAckPort = syntAckPort;
             syntInfo->clientListenPort = clientPort;
             syntInfo->heartbeatPort = heartbeatPort;
             

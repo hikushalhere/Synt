@@ -16,7 +16,8 @@ typedef struct {
     uint32_t numControllers;
     std::map<uint32_t, std::string> hostNameMap;
     std::string paxosPort;
-    std::string syntListenPort;
+    std::string syntMessagePort;
+    std::string syntAckPort;
     std::string clientListenPort;
     std::string heartbeatPort;
 } SyntInfo;
