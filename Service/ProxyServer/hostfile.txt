@@ -1,0 +1,5 @@
+xinu01.cs.purdue.edu
+xinu02.cs.purdue.edu
+xinu03.cs.purdue.edu
+xinu04.cs.purdue.edu
+xinu05.cs.purdue.edu
